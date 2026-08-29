@@ -1,15 +1,12 @@
 import type { FastifyInstance } from "fastify";
-import { runQuery } from "../db";
-import { filtersFromQuery } from "../filters";
-import { authenticate, AuthError } from "../auth";
+import { AuthError, login } from "../auth";
 import { ValidationError } from "../errors";
 
-export async function registerQueryRoute(app: FastifyInstance) {
-  app.get("/api/query", async (request, reply) => {
-    const query = request.query as Record<string, unknown>;
+export async function registerLoginRoute(app: FastifyInstance) {
+  app.post("/api/login", async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
     try {
-      const claims = authenticate(request.headers as Record<string, unknown>, query);
-      return await runQuery(filtersFromQuery(query, claims));
+      return login(body.username, body.password);
     } catch (err) {
       if (err instanceof AuthError) {
         reply.code(401);

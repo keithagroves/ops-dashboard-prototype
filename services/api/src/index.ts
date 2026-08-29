@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import Redis from "ioredis";
+import { registerLoginRoute } from "./routes/login";
 import { registerQueryRoute } from "./routes/query";
 import { registerStreamRoute } from "./routes/stream";
 import { pool } from "./db";
@@ -12,6 +13,7 @@ async function main() {
   const app = Fastify({ logger: false });
   await app.register(cors, { origin: true });
 
+  await registerLoginRoute(app);
   await registerQueryRoute(app);
   await registerStreamRoute(app);
 

@@ -2,20 +2,29 @@ import type { FastifyInstance } from "fastify";
 import { runQuery, validateFilters } from "../db";
 import { filtersFromQuery } from "../filters";
 import { onUpdate } from "../redisSub";
+import { authenticate, AuthError } from "../auth";
 import { ValidationError } from "../errors";
 
 const MIN_PUSH_INTERVAL_MS = 500;
 
 export async function registerStreamRoute(app: FastifyInstance) {
   app.get("/api/stream", async (request, reply) => {
-    const filters = filtersFromQuery(request.query as Record<string, unknown>);
+    const query = request.query as Record<string, unknown>;
 
-    // Validate before committing to an SSE response - an invalid request
-    // gets a normal 400 instead of a 200 that immediately emits an error
-    // frame and leaves the client to figure out the stream is dead on arrival.
+    // Authenticate and validate before committing to an SSE response - a bad
+    // request gets a normal 401/400 instead of a 200 that immediately emits
+    // an error frame and leaves the client to figure out the stream is dead
+    // on arrival.
+    let filters;
     try {
+      const claims = authenticate(request.headers as Record<string, unknown>, query);
+      filters = filtersFromQuery(query, claims);
       validateFilters(filters);
     } catch (err) {
+      if (err instanceof AuthError) {
+        reply.code(401);
+        return { error: err.message };
+      }
       if (err instanceof ValidationError) {
         reply.code(400);
         return { error: err.message };
