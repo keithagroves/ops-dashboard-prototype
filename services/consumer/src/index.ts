@@ -2,7 +2,8 @@ import { Kafka } from "kafkajs";
 import { Pool } from "pg";
 import Redis from "ioredis";
 import { KAFKA_TOPIC, REDIS_UPDATE_CHANNEL, type TxEvent } from "@nymbus/shared";
-import { insertBatch, type IngestRecord } from "./batchWriter";
+import { insertInBatches, type IngestRecord } from "./batchWriter";
+import { publishWithRetry } from "./publish";
 import { validateTxEvent } from "./validate";
 
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || "localhost:9092").split(",");
@@ -34,19 +35,6 @@ async function main() {
     console.error("[consumer] redis connection error (publish will fail and be logged, not fatal):", err.message);
   });
 
-  const PUBLISH_TIMEOUT_MS = 500;
-  function publishWithTimeout(channel: string, message: string): Promise<void> {
-    // Belt-and-suspenders on top of the client config above: notification
-    // delivery must never be able to hold up offset commits, regardless of
-    // exactly how a future ioredis version's retry/queue defaults behave.
-    return Promise.race([
-      redis.publish(channel, message).then(() => undefined),
-      new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error(`redis publish exceeded ${PUBLISH_TIMEOUT_MS}ms`)), PUBLISH_TIMEOUT_MS),
-      ),
-    ]);
-  }
-
   const kafka = new Kafka({ clientId: "tx-consumer", brokers: KAFKA_BROKERS });
   const consumer = kafka.consumer({ groupId: "tx-consumer-group" });
 
@@ -65,7 +53,12 @@ async function main() {
 
       const records: IngestRecord[] = [];
       for (const message of batch.messages) {
-        if (!message.value) continue;
+        if (!message.value) {
+          console.warn(
+            `[consumer] skipping empty Kafka value: topic=${batch.topic} partition=${batch.partition} offset=${message.offset}`,
+          );
+          continue;
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(message.value.toString());
@@ -91,15 +84,17 @@ async function main() {
       // ON CONFLICT DO NOTHING is what keeps that replay from duplicating
       // rows instead of a second application-level validation pass.
       if (records.length > 0) {
-        await insertBatch(pool, records);
+        await insertInBatches(pool, records);
         totalWritten += records.length;
 
         // A Redis outage should never block the Kafka offset commit below -
         // the write already succeeded and is the thing that matters.
         try {
-          await publishWithTimeout(REDIS_UPDATE_CHANNEL, JSON.stringify({ count: records.length, at: Date.now() }));
+          await publishWithRetry(() =>
+            redis.publish(REDIS_UPDATE_CHANNEL, JSON.stringify({ count: records.length, at: Date.now() })),
+          );
         } catch (err) {
-          console.warn(`[consumer] failed to publish update notification: ${(err as Error).message}`);
+          console.error(`[consumer] failed to publish update notification after 3 attempts: ${(err as Error).message}`);
         }
       }
 

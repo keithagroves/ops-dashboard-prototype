@@ -7,8 +7,13 @@ export interface IngestRecord {
   offset: string;
 }
 
+export const MAX_INSERT_BATCH_SIZE = 1_000;
+
 export async function insertBatch(pool: Pool, records: IngestRecord[]): Promise<void> {
   if (records.length === 0) return;
+  if (records.length > MAX_INSERT_BATCH_SIZE) {
+    throw new Error(`insert batch exceeds ${MAX_INSERT_BATCH_SIZE} records`);
+  }
 
   const columns = [
     "event_ts",
@@ -53,4 +58,17 @@ export async function insertBatch(pool: Pool, records: IngestRecord[]): Promise<
     ON CONFLICT (kafka_partition, kafka_offset) DO NOTHING
   `;
   await pool.query(sql, values);
+}
+
+/**
+ * KafkaJS controls fetch formation and can return more than 1,000 messages.
+ * Split that fetch into bounded multi-row inserts while preserving ordering.
+ * Offsets are still committed only after every chunk succeeds, and replay of
+ * an earlier successful chunk remains safe through the Kafka-coordinate
+ * uniqueness constraint.
+ */
+export async function insertInBatches(pool: Pool, records: IngestRecord[]): Promise<void> {
+  for (let start = 0; start < records.length; start += MAX_INSERT_BATCH_SIZE) {
+    await insertBatch(pool, records.slice(start, start + MAX_INSERT_BATCH_SIZE));
+  }
 }
