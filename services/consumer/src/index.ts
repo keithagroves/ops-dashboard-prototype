@@ -19,10 +19,27 @@ async function main() {
     console.error("[consumer] postgres pool error (will retry on next batch):", err.message);
   });
 
-  const redis = new Redis(REDIS_URL);
+  // enableOfflineQueue:false + a low maxRetriesPerRequest make a publish()
+  // fail fast (reject) instead of queuing/retrying for ~10s while Redis is
+  // unreachable - measured at 10.5s with ioredis's defaults, which is 10.5s
+  // every batch spent blocked before ever reaching resolveOffset below.
+  const redis = new Redis(REDIS_URL, { enableOfflineQueue: false, maxRetriesPerRequest: 1, connectTimeout: 1000 });
   redis.on("error", (err) => {
     console.error("[consumer] redis connection error (publish will fail and be logged, not fatal):", err.message);
   });
+
+  const PUBLISH_TIMEOUT_MS = 500;
+  function publishWithTimeout(channel: string, message: string): Promise<void> {
+    // Belt-and-suspenders on top of the client config above: notification
+    // delivery must never be able to hold up offset commits, regardless of
+    // exactly how a future ioredis version's retry/queue defaults behave.
+    return Promise.race([
+      redis.publish(channel, message).then(() => undefined),
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error(`redis publish exceeded ${PUBLISH_TIMEOUT_MS}ms`)), PUBLISH_TIMEOUT_MS),
+      ),
+    ]);
+  }
 
   const kafka = new Kafka({ clientId: "tx-consumer", brokers: KAFKA_BROKERS });
   const consumer = kafka.consumer({ groupId: "tx-consumer-group" });
@@ -74,7 +91,7 @@ async function main() {
         // A Redis outage should never block the Kafka offset commit below -
         // the write already succeeded and is the thing that matters.
         try {
-          await redis.publish(REDIS_UPDATE_CHANNEL, JSON.stringify({ count: records.length, at: Date.now() }));
+          await publishWithTimeout(REDIS_UPDATE_CHANNEL, JSON.stringify({ count: records.length, at: Date.now() }));
         } catch (err) {
           console.warn(`[consumer] failed to publish update notification: ${(err as Error).message}`);
         }
