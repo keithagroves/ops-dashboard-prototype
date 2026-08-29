@@ -1,13 +1,27 @@
 import type { FastifyInstance } from "fastify";
-import { runQuery } from "../db";
+import { runQuery, validateFilters } from "../db";
 import { filtersFromQuery } from "../filters";
 import { onUpdate } from "../redisSub";
+import { ValidationError } from "../errors";
 
 const MIN_PUSH_INTERVAL_MS = 500;
 
 export async function registerStreamRoute(app: FastifyInstance) {
   app.get("/api/stream", async (request, reply) => {
     const filters = filtersFromQuery(request.query as Record<string, unknown>);
+
+    // Validate before committing to an SSE response - an invalid request
+    // gets a normal 400 instead of a 200 that immediately emits an error
+    // frame and leaves the client to figure out the stream is dead on arrival.
+    try {
+      validateFilters(filters);
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        reply.code(400);
+        return { error: err.message };
+      }
+      throw err;
+    }
 
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -27,18 +41,32 @@ export async function registerStreamRoute(app: FastifyInstance) {
 
     await send();
 
-    let pending = false;
+    // A trigger while a send is already in flight sets `queued` rather than
+    // starting a second, overlapping send - otherwise a burst of Redis
+    // notifications during one slow query can fire concurrent queries for
+    // the same connection instead of the intended one-at-a-time cadence.
+    let running = false;
+    let queued = false;
     let lastSent = Date.now();
-    const unsubscribe = onUpdate(() => {
-      if (pending) return;
+
+    const trigger = () => {
+      if (running) {
+        queued = true;
+        return;
+      }
       const wait = Math.max(0, MIN_PUSH_INTERVAL_MS - (Date.now() - lastSent));
-      pending = true;
+      running = true;
       setTimeout(async () => {
-        pending = false;
-        lastSent = Date.now();
-        await send();
+        do {
+          queued = false;
+          await send();
+          lastSent = Date.now();
+        } while (queued);
+        running = false;
       }, wait);
-    });
+    };
+
+    const unsubscribe = onUpdate(trigger);
 
     const keepAlive = setInterval(() => {
       reply.raw.write(": keep-alive\n\n");

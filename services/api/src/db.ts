@@ -1,9 +1,19 @@
 import { Pool } from "pg";
 import type { DrilldownRow, QueryFilters, QueryResult } from "@nymbus/shared";
+import { ValidationError } from "./errors";
 
 const PG_URL = process.env.DATABASE_URL || "postgres://nymbus:nymbus@localhost:5433/ops_dashboard";
 
 export const pool = new Pool({ connectionString: PG_URL });
+
+// node-postgres emits 'error' on the pool when an idle client hits a
+// connection-level error (e.g. Postgres restarts or becomes unreachable).
+// Without a listener here, that's an unhandled event that crashes the
+// entire process - discovered by actually stopping Postgres under a live
+// API instance rather than assuming query-level try/catch was sufficient.
+pool.on("error", (err) => {
+  console.error("[api] postgres pool error (connection will be retried on next query):", err.message);
+});
 
 function bucketSecondsFor(windowMinutes: number): number {
   if (windowMinutes <= 5) return 5;
@@ -11,7 +21,17 @@ function bucketSecondsFor(windowMinutes: number): number {
   return 60;
 }
 
+// Cheap enough to call before opening an SSE stream (or from the snapshot
+// route) so an invalid request is rejected with a normal error response
+// instead of getting a 200 + `event: error` frame after the fact.
+export function validateFilters(filters: QueryFilters): void {
+  if (filters.role === "tenant" && !filters.tenantId) {
+    throw new ValidationError("tenantId is required for role=tenant");
+  }
+}
+
 function buildWhere(filters: QueryFilters): { clause: string; params: unknown[] } {
+  validateFilters(filters);
   const windowMinutes = filters.windowMinutes ?? 15;
   const conditions: string[] = [`event_ts > now() - interval '${windowMinutes} minutes'`];
   const params: unknown[] = [];
@@ -21,9 +41,6 @@ function buildWhere(filters: QueryFilters): { clause: string; params: unknown[] 
   // production this comes from a verified JWT claim, not a request field -
   // the prototype takes tenantId as a plain param to stand in for that claim.
   if (filters.role === "tenant") {
-    if (!filters.tenantId) {
-      throw new Error("tenantId is required for role=tenant");
-    }
     params.push(filters.tenantId);
     conditions.push(`tenant_id = $${params.length}`);
   } else if (filters.tenantId) {
@@ -55,7 +72,29 @@ function buildWhere(filters: QueryFilters): { clause: string; params: unknown[] 
   return { clause: conditions.join(" AND "), params };
 }
 
+// Every connected SSE client re-queries independently on each Redis
+// notification. Without this, N clients sharing the same filters (the
+// common case - most global-ops viewers have no extra filters applied)
+// means N redundant round-trips to Postgres per push, every ~500ms. This
+// collapses concurrent/rapid calls with an identical filter signature into
+// one shared query, so DB load scales with distinct filter combinations in
+// use, not with connected client count.
+const QUERY_CACHE_MS = 400;
+const queryCache = new Map<string, { at: number; promise: Promise<QueryResult> }>();
+
 export async function runQuery(filters: QueryFilters): Promise<QueryResult> {
+  const key = JSON.stringify(filters);
+  const cached = queryCache.get(key);
+  if (cached && Date.now() - cached.at < QUERY_CACHE_MS) {
+    return cached.promise;
+  }
+  const promise = runQueryUncached(filters);
+  queryCache.set(key, { at: Date.now(), promise });
+  promise.catch(() => queryCache.delete(key));
+  return promise;
+}
+
+async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
   const windowMinutes = filters.windowMinutes ?? 15;
   const bucketSeconds = bucketSecondsFor(windowMinutes);
   const { clause, params } = buildWhere(filters);

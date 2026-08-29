@@ -9,6 +9,13 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 // with its own subscriber like this one) re-queries and pushes to its own
 // connected browsers.
 const subscriber = new Redis(REDIS_URL);
+// ioredis is an EventEmitter - an unhandled 'error' event (e.g. Redis
+// becomes unreachable) throws and crashes the process. ioredis reconnects
+// on its own by default; this just keeps a transient outage from taking
+// the whole API instance down with it.
+subscriber.on("error", (err) => {
+  console.error("[api] redis subscriber error (ioredis will retry the connection):", err.message);
+});
 subscriber.subscribe(REDIS_UPDATE_CHANNEL);
 
 const listeners = new Set<() => void>();
