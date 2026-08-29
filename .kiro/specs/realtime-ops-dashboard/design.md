@@ -149,7 +149,7 @@ None of this was found by reading the code more carefully — it came from adver
 
 ## Testing Strategy
 
-Verification combines focused automated tests with adversarial checks against the running system. The API suite covers authentication, token-derived tenant scope, filter parsing/validation, and SQL parameterization. Live checks exercise the distributed behaviors that unit tests cannot establish on their own:
+Verification combines focused automated tests with adversarial checks against the running system. The self-contained suite covers authentication, token-derived tenant scope, Fastify route contracts, filter parsing/validation, SQL parameterization, SSE notification scheduling, consumer payload boundaries, generator configuration, and dashboard data/URL helpers. It runs without Docker or live service connections. Live checks exercise the distributed behaviors that isolated tests cannot establish on their own:
 
 - **Fire-and-forget capture (Req 1):** confirmed via the Generator's `sent`/`dropped` log line under normal operation (0 dropped at steady TPS).
 - **Batched ingestion and crash recovery (Req 3):** killed the Consumer process mid-stream, confirmed the Postgres row count stalled, restarted it, confirmed `kafka-consumer-groups.sh --describe` showed lag return to 0 with no gap or duplicate rows.

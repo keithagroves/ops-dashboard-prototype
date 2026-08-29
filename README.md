@@ -102,24 +102,35 @@ records because this prototype table is operational telemetry, not a ledger.
 ### Tests
 
 ```bash
-npm test          # both workspaces, no infra required
+npm test          # all four application workspaces, no infra required
 ```
 
 Node's built-in test runner (`node --test`) via `tsx` — no test framework
-dependency. Coverage is deliberately narrow: the pure logic where a mistake is
-either a security hole or a silently wrong number, not the React rendering.
+dependency. The default suite is intentionally self-contained: it does not
+need Docker, bind live ports, or connect to Postgres, Redis, or Kafka.
 
 - `services/api/src/auth.test.ts` — token issuance and verification: forged
   signatures, `alg=none`, expiry, a tenant token with no tenantId, and that
   wrong-password and unknown-user return the *same* error.
+- `services/api/src/routes.test.ts` — Fastify route contracts through in-memory
+  requests: status codes, tenant scoping, filter parsing, sanitized failures,
+  and SSE authentication/validation before response streaming begins.
+- `services/api/src/sseThrottle.test.ts` — deterministic burst coalescing,
+  minimum update spacing, non-overlap, error recovery, and cancellation when a
+  client disconnects.
 - `services/api/src/filters.test.ts` — scope comes from the token, so
   `?role=global` from a tenant session is ignored.
 - `services/api/src/db.test.ts` — `validateFilters` enum/window rejection, and
   that `buildWhere` parameterizes every attacker-influenced value while always
   applying the claim-derived tenant predicate.
+- `services/consumer/src/validate.test.ts` — poison-message protection,
+  cross-field event rules, safe bigint amounts, and Postgres int4 latency
+  boundaries.
+- `services/generator/src/config.test.ts` — safe defaults plus valid and invalid
+  operator environment overrides.
 - `apps/dashboard/app/lib/*.test.ts` — approval-rate maths (empty window is
-  `null`, not `0`), the tenant-health thresholds, and which filters are
-  presented as dismissible (a tenant session's own tenant is not one).
+  `null`, not `0`), tenant-health thresholds, active-filter behavior, and API
+  URL serialization without leaking client-provided role.
 
 The two tenant-scoping tests were verified by deliberately reintroducing each
 bug and confirming the suite goes red, rather than trusting a green run.
@@ -267,8 +278,9 @@ dependency outages, incident drill-down, and the query cache under concurrency.
 3. Partition `tx_events` by time and add hourly/minute rollups if the soak test shows
    raw-event aggregation cannot meet the dashboard latency target. A production
    24-hour comparison needs 48 hours of raw retention or equivalent rollups.
-4. Extend the existing authentication/filter tests with API contract, browser
-   reconnect, consumer replay, and dependency failure-injection coverage; wire
-   dropped-event and consumer-lag counters into the existing metrics surface.
+4. Add browser reconnect, consumer replay, and dependency failure-injection
+   coverage; wire dropped-event and consumer-lag counters into the existing
+   metrics surface. API contracts and service boundary rules are now covered
+   by the self-contained default suite.
 5. Add deployment manifests, secret management, rate limiting, CSP/HTTPS policy,
    and an operational runbook before treating the prototype as production-track.
