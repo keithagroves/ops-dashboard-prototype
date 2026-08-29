@@ -26,13 +26,13 @@ Two properties drive every choice below:
 
 ### Generator (`services/generator`)
 - `config.ts` reads `TPS`, `TENANT_COUNT`, `HOT_TENANT_RATIO`, `HOT_TENANT_FRACTION`, `LATENCY_MEAN_MS`, `LATENCY_P99_MS`, and the `INCIDENT_*` variables from the environment.
-- `index.ts` runs a `setInterval` loop at the configured TPS, builds a `TxEvent` (shared type), and calls the kafkajs producer's `send()` without `await`-ing it on the loop — `.then()`/`.catch()` update `sent`/`dropped` counters logged every 5s. Satisfies Requirement 1.
+- `index.ts` runs a `setInterval` loop at the configured TPS, builds a `TxEvent` (shared type), and calls the kafkajs producer's `send()` without `await`-ing it on the loop — `.then()`/`.catch()` update `sent`/`dropped` counters logged every 5s and exposed from a Prometheus-compatible `/metrics` endpoint. Satisfies Requirement 1.
 - Traffic shaping satisfies Requirement 1.7/1.8 directly: `hotTenantFraction` (default 0.1) and `hotTenantRatio` (default 0.6) implement the "hottest 10% of tenants get ~60% of traffic" distribution; `TPS` is operator-configurable up to and beyond 150.
-- Incident mode (`maybeStartIncident`) implements Requirement 18 by tracking one active `{ tenantId, endsAt }` window and re-weighting outcome-code selection for that tenant while active.
+- Incident mode uses a deterministic interval controller, requires every `INCIDENT_*` input when enabled, logs complete start/clear context, and re-weights outcome-code selection for the target tenant while active.
 
 ### Consumer (`services/consumer`)
-- `index.ts` subscribes to `tx-events` via kafkajs's `eachBatch`, buffers parsed events per batch, calls `insertBatch` (a single multi-row `INSERT`), then resolves offsets and commits only after the insert succeeds. Satisfies Requirement 3.
-- After a successful insert, publishes to `tx:updates` via `ioredis`. Satisfies Requirement 4.1.
+- `index.ts` subscribes to `tx-events` via kafkajs's `eachBatch`, buffers parsed events, splits an oversized fetch into multi-row inserts capped at 1,000 records, then resolves offsets and commits only after every insert succeeds. Satisfies Requirement 3.
+- After a successful insert, publishes to `tx:updates` via `ioredis`, with exactly three bounded attempts inside the 500ms notification budget. Satisfies Requirement 4.1/4.2.
 - A separate `setInterval` runs the retention `DELETE` every 30s (Requirement 16.2). `RETENTION_MINUTES` defaults to 60 and rejects smaller values so the longest current/prior comparison has complete source data.
 
 ### API (`services/api`)
@@ -107,31 +107,16 @@ A 400ms result cache keyed by filter signature collapses concurrent identical re
 | Kafka produce fails or broker unreachable | Generator drops the event, increments a counter, does not block | 1.2, 1.5 |
 | Kafka message fails to parse | Consumer skips it, logs a warning, continues the batch | 3.5 |
 | Consumer process crashes mid-batch | Restart resumes from last committed offset; the failed batch replays | 3.3 |
-| Postgres insert fails | Exception propagates out of `eachBatch`; kafkajs will not have committed offsets for that batch, so it replays on the next poll | 3 (partial — see Known Deviations) |
-| Redis publish fails | Logged; does not affect the already-committed Postgres write | 4.2 (partial — see Known Deviations) |
+| Postgres insert fails | Exception propagates out of `eachBatch`; kafkajs will not have committed offsets for that batch, so it replays on the next poll | 3 |
+| Redis publish fails three bounded attempts | Logged and discarded; does not affect the already-committed Postgres write | 4.2 |
 | API re-query fails during an SSE push | `event: error` frame sent to that client; connection stays open | 8.8, 17.5 |
 | SSE client disconnects | Redis listener unsubscribed synchronously in the `close` handler | 8.7 |
 | Missing/invalid/expired token or unsafe tenant claim | Request is rejected with 401 before any query executes | 5.2 |
 | Malformed filter value | Request is rejected with 400 before query/SSE response begins | 6, 9.2 |
 
-## Known Deviations from Requirements (Prototype Scope)
+## Remaining Production Validation
 
-The exercise this prototype was built for explicitly does not require production-hardening or full test coverage. The items below are acceptance criteria in `requirements.md` that describe a level of hardening the current code does not implement — listed here rather than silently left inconsistent, so `tasks.md` can accurately reflect what's actually built.
-
-| Requirement | Written behavior | Actual behavior | Why acceptable for now |
-|---|---|---|---|
-| 4.2 | Retry Redis publish 3 times before giving up | Single publish attempt, now wrapped so failure is logged and discarded without affecting the already-committed insert | An external audit flagged the un-wrapped version as a crash risk (see Audit Remediation below); the specific "3 attempts" figure remains unimplemented, but the actual requirement intent — a failed publish must never take down the write path — is now met |
-| 3.2 | Cap batches at 1000 messages | No explicit cap set; batch size follows kafkajs's own fetch-size defaults | At demo/prototype throughput, batches never approach 1000; worth adding a real `maxBytes`/count guard before production |
-| 7.2 | Empty trend buckets appear with `count: 0` | Only buckets with ≥1 matching row are returned | Minor chart-continuity gap (a flat line reads as "no data" instead of an explicit zero); straightforward to add with a `generate_series` join |
-| 8.3 | Close the SSE connection on invalid filters | Filters are now validated *before* the stream opens (400 JSON response, no SSE headers sent) rather than after | Resolved during audit remediation — this was originally a deviation, now matches the requirement more closely than the original "emit error, stay open" behavior did |
-| 10.5 | Show an explicit error indicator on an unparseable SSE frame | Malformed frame is silently ignored | Low risk — the API only ever emits frames it generated itself; this matters more if the API's payload shape changes independently of the dashboard |
-| 12.3, 13.4, 15.3 | Explicit "no data" empty states | Panels render an empty chart/table instead of a message | Cosmetic polish item, not a correctness gap |
-| 18.5 | Missing/invalid incident env vars cause the Generator to log an error and exit | Falls back to documented defaults instead | Friendlier for demo use (a typo'd env var shouldn't kill the whole traffic generator); the stricter behavior matters more once this drives anything beyond a live demo |
-| 1.6 | Dropped-event counter exposed via "existing metrics interface" | Logged to stdout every 5s; no queryable metrics endpoint | There is no real metrics interface in the prototype to attach to — this is the one criterion that's aspirational until the Generator has an actual `/metrics` surface |
-
-`9.3` (HTTP 500 for server errors, distinct from 400) is no longer a deviation — see Audit Remediation.
-
-None of the remaining rows affect the properties the exercise is actually evaluated on — the hot path never blocks, tenant isolation is enforced server-side, and the pipeline recovers from a mid-stream crash without data loss or duplication. All were verified live, not just asserted (see Testing Strategy).
+The prototype acceptance behaviors are implemented. What remains is evidence at production duration and volume rather than a known code-level deviation: a sustained 100–150 TPS soak, query-latency measurements over a genuinely full 24-hour window, and 48-hour source or rollup coverage for the preceding-period comparison. The compressed 5/15/30-minute windows remain an explicit prototype-scope choice permitted by Requirement 6.5.
 
 ## Audit Remediation
 
@@ -149,7 +134,7 @@ None of this was found by reading the code more carefully — it came from adver
 
 ## Testing Strategy
 
-Verification combines focused automated tests with adversarial checks against the running system. The self-contained suite covers authentication, token-derived tenant scope, Fastify route contracts, filter parsing/validation, SQL parameterization, SSE notification scheduling, consumer payload boundaries, generator configuration, and dashboard data/URL helpers. It runs without Docker or live service connections. Live checks exercise the distributed behaviors that isolated tests cannot establish on their own:
+Verification combines focused automated tests with adversarial checks against the running system. The self-contained suite covers authentication, token-derived tenant scope, Fastify route contracts, filter parsing/validation, SQL parameterization and zero-filled buckets, SSE notification scheduling, bounded batch writes, Redis retry policy, consumer payload boundaries, deterministic incident scheduling, traffic distribution, generator metrics, and dashboard data/URL/payload helpers. It runs without Docker or live service connections. Live checks exercise the distributed behaviors that isolated tests cannot establish on their own:
 
 - **Fire-and-forget capture (Req 1):** confirmed via the Generator's `sent`/`dropped` log line under normal operation (0 dropped at steady TPS).
 - **Batched ingestion and crash recovery (Req 3):** killed the Consumer process mid-stream, confirmed the Postgres row count stalled, restarted it, confirmed `kafka-consumer-groups.sh --describe` showed lag return to 0 with no gap or duplicate rows.

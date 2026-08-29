@@ -8,6 +8,7 @@ operations dashboard.
 ## Submission map
 
 - **Working application:** generator, Kafka consumer, Fastify API, and Next.js dashboard in this repository.
+- **Visual map:** [overview.md](overview.md) — a Mermaid architecture diagram whose nodes link straight into the source, plus an annotated file index. The quickest way in if you are reading this repository for the first time.
 - **Kiro specs:** [requirements](.kiro/specs/realtime-ops-dashboard/requirements.md), [technical design](.kiro/specs/realtime-ops-dashboard/design.md), and [task breakdown](.kiro/specs/realtime-ops-dashboard/tasks.md).
 - **Approach and tradeoffs:** the architecture summary below and the longer [design journey](notes.md).
 - **AI usage:** [AI_USAGE.md](AI_USAGE.md).
@@ -122,16 +123,18 @@ need Docker, bind live ports, or connect to Postgres, Redis, or Kafka.
   `?role=global` from a tenant session is ignored.
 - `services/api/src/db.test.ts` — `validateFilters` enum/window rejection, and
   that `buildWhere` parameterizes every attacker-influenced value while always
-  applying the claim-derived tenant predicate.
-- `services/consumer/src/validate.test.ts` — poison-message protection,
-  cross-field event rules, safe bigint amounts, and Postgres int4 latency
-  boundaries.
-- `services/generator/src/config.test.ts` — safe defaults plus valid and invalid
-  operator environment overrides.
+  applying the claim-derived tenant predicate; trend SQL is checked for
+  zero-filled time buckets.
+- `services/consumer/src/*.test.ts` — poison-message protection, cross-field
+  event rules, database numeric boundaries, 1,000-row insert chunking, and the
+  three-attempt Redis notification policy.
+- `services/generator/src/*.test.ts` — safe configuration, strict incident-mode
+  inputs and deterministic cycles, queryable metric rendering, and the required
+  50-tenant/60%-hot traffic distribution at a 150 TPS sample rate.
 - `apps/dashboard/app/lib/*.test.ts` — approval-rate maths (empty window is
   `null`, not `0`), tenant-health thresholds, active-filter behavior, outcome
-  severity banding, and API URL serialization without leaking client-provided
-  role.
+  severity banding, runtime `QueryResult` validation, and API URL serialization
+  without leaking client-provided role.
 
 The two tenant-scoping tests were verified by deliberately reintroducing each
 bug and confirming the suite goes red, rather than trusting a green run.
@@ -141,11 +144,15 @@ bug and confirming the suite goes red, rather than trusting a green run.
 - `TPS` (default 30) — event rate. Real platform peak is 100-150 TPS; kept
   lower here to stay laptop-friendly. The pipeline's per-message cost doesn't
   change with volume, only batch sizes/timers would be tuned.
-- `INCIDENT_MODE=true INCIDENT_TENANT_INDEX=1 INCIDENT_INTERVAL_SEC=15 INCIDENT_DURATION_SEC=8`
+- `INCIDENT_MODE=true INCIDENT_TENANT_INDEX=1 INCIDENT_INTERVAL_SEC=15 INCIDENT_DURATION_SEC=8 INCIDENT_OUTCOME=issuer_unavailable`
   — periodically spikes a specific outcome code for a specific tenant, so the
   "approval rate dips, filter into it, see why" drill-down story has something
-  real to find. Verified live: filtering to the affected tenant + outcome code
-  shows a clear spike in the trend chart and the exact matching rows.
+  real to find. All four `INCIDENT_*` values are required and validated when
+  incident mode is enabled. Verified live: filtering to the affected tenant +
+  outcome code shows a clear spike and the exact matching rows.
+- `METRICS_PORT` (default `9464`) — exposes Prometheus text metrics at
+  `http://localhost:<port>/metrics`, including sent, dropped, and in-flight
+  Kafka sends.
 
 The consumer also accepts `RETENTION_MINUTES` (default `60`, minimum `60`).
 Sixty minutes is required because the longest 30-minute view compares its KPIs
@@ -280,8 +287,8 @@ dependency outages, incident drill-down, and the query cache under concurrency.
    raw-event aggregation cannot meet the dashboard latency target. A production
    24-hour comparison needs 48 hours of raw retention or equivalent rollups.
 4. Add browser reconnect, consumer replay, and dependency failure-injection
-   coverage; wire dropped-event and consumer-lag counters into the existing
-   metrics surface. API contracts and service boundary rules are now covered
-   by the self-contained default suite.
+   coverage; add consumer-lag metrics alongside the Generator's sent/dropped
+   counters. API contracts and service boundary rules are covered by the
+   self-contained default suite.
 5. Add deployment manifests, secret management, rate limiting, CSP/HTTPS policy,
    and an operational runbook before treating the prototype as production-track.

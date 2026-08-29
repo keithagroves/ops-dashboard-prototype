@@ -24,9 +24,11 @@ This is a retroactive task record: the prototype was built before this spec work
   - [x] 4.1 Batch consumption via `eachBatch`, multi-row insert per batch, offset commit only after a successful write.
     - _Requirements: 3_
   - [x] 4.2 Redis publish to `tx:updates` after each successful batch write.
-    - _Requirements: 4.1 (partial — see design.md: no retry loop on publish failure)_
+    - Three bounded attempts complete inside the 500ms notification budget.
+    - _Requirements: 4.1, 4.2_
   - [x] 4.3 Periodic retention cleanup (`DELETE` on an interval ≤30s).
-    - _Requirements: 16 (partial — see design.md: no zero-row logging or failure retry handling)_
+    - Logs zero/non-zero removal counts and retries failures on the next cycle.
+    - _Requirements: 16_
 
 - [x] 5. Build the Fastify API
   - [x] 5.1 Signed demo authentication plus a shared filter-builder (`auth.ts`, `filters.ts`, `db.ts`) enforcing claim-derived tenant scoping identically on both routes.
@@ -74,7 +76,7 @@ This is a retroactive task record: the prototype was built before this spec work
   - Reconcile the Kiro requirements/design/tasks with the authenticated dashboard and comparative metrics.
   - Add `AI_USAGE.md`, an explicit README submission map, migration guidance, verification commands, and production next steps.
 
-## Not started
+## Follow-up hardening
 
-- [ ] 10. Close the remaining prototype deviations in `design.md` (batch cap, zero-filled trend buckets, explicit malformed-frame/empty UI states, Redis publish retries, and a queryable dropped-event metric) before production-track use.
+- [x] 10. Close the audited prototype deviations: 1,000-row batch cap, zero-filled trend buckets, explicit malformed-frame/empty UI states, Redis publish retries, strict deterministic incident mode, and a queryable dropped-event metric.
 - [ ] 11. Validate at production-representative scale: sustained 100–150 TPS, a full 24-hour window, and 48-hour source/rollup coverage for prior-period comparison.
