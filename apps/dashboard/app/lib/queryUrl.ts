@@ -12,10 +12,13 @@ export function getApiBase(): string {
   return port ? `http://localhost:${port}` : DEFAULT_API_BASE;
 }
 
-export function buildUrl(path: string, filters: QueryFilters): string {
+// `role` is deliberately not sent: the API takes it from the verified token,
+// and a tenant caller's tenantId too. The tenantId below is only honoured for
+// a global operator narrowing to one tenant.
+export function buildUrl(path: string, filters: QueryFilters, token: string): string {
   const API_BASE = getApiBase();
   const params = new URLSearchParams();
-  params.set("role", filters.role);
+  params.set("token", token);
   if (filters.tenantId) params.set("tenantId", filters.tenantId);
   if (filters.eftVendor) params.set("eftVendor", filters.eftVendor);
   if (filters.messageType) params.set("messageType", filters.messageType);

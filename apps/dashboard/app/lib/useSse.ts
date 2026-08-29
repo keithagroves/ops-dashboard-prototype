@@ -1,34 +1,64 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { QueryFilters, QueryResult } from "@nymbus/shared";
+import type { QueryFilters, QueryResult, TenantHealthPoint } from "@nymbus/shared";
 import { buildUrl } from "./queryUrl";
+import { sameTenantHealth } from "./tenantHealth";
 
-export function useSse(filters: QueryFilters) {
-  const [data, setData] = useState<QueryResult | null>(null);
-  const [connected, setConnected] = useState(false);
-  const key = JSON.stringify(filters);
+export function useSse(filters: QueryFilters, token: string) {
+  const [snapshot, setSnapshot] = useState<{ key: string; data: QueryResult; receivedAt: number } | null>(null);
+  const [connectedKey, setConnectedKey] = useState<string | null>(null);
+  // Tenant health is navigation context, not filter-scoped panel data. Keep
+  // the last list for this exact token while a replacement filtered stream
+  // connects, so changing vendor/type does not unmount the whole navigator.
+  const [tenantSnapshot, setTenantSnapshot] = useState<{ token: string; tenants: TenantHealthPoint[] } | null>(null);
+  // Include the credential as well as the filters: even if a future caller
+  // reuses this hook without remounting on account change, a prior user's
+  // snapshot can never be rendered under the new scope.
+  const key = JSON.stringify([token, filters]);
 
   useEffect(() => {
     // Reopening the connection on filter change (rather than tracking
     // per-connection filter state server-side) is the pragmatic choice for
     // this scope: simpler to implement correctly, same user-visible result.
-    const url = buildUrl("/api/stream", filters);
+    const url = buildUrl("/api/stream", filters, token);
     const es = new EventSource(url);
 
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
+    es.onopen = () => setConnectedKey(key);
+    es.onerror = () => setConnectedKey((current) => (current === key ? null : current));
     es.onmessage = (event) => {
       try {
-        setData(JSON.parse(event.data) as QueryResult);
+        const data = JSON.parse(event.data) as QueryResult;
+        if (data.tenants.length > 0) {
+          setTenantSnapshot((current) =>
+            current?.token === token && sameTenantHealth(current.tenants, data.tenants)
+              ? current
+              : { token, tenants: data.tenants },
+          );
+        }
+        setSnapshot({ key, data, receivedAt: Date.now() });
       } catch {
         // ignore malformed frame
       }
     };
 
-    return () => es.close();
+    return () => {
+      es.onopen = null;
+      es.onerror = null;
+      es.onmessage = null;
+      es.close();
+      setConnectedKey((current) => (current === key ? null : current));
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, token]);
 
-  return { data, connected };
+  // Scope the returned state synchronously during render. Effects run after a
+  // paint, so merely clearing state inside the effect still flashes the old
+  // tenant/global payload for one render after a filter change.
+  return {
+    data: snapshot?.key === key ? snapshot.data : null,
+    connected: connectedKey === key,
+    lastEventAt: snapshot?.key === key ? snapshot.receivedAt : null,
+    tenants: tenantSnapshot?.token === token ? tenantSnapshot.tenants : [],
+  };
 }

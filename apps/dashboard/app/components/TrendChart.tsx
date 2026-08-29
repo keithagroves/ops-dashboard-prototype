@@ -11,7 +11,7 @@ export function TrendChart({ trend }: { trend: TrendPoint[] }) {
 
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
-      <h2 className="mb-2 text-sm font-medium text-neutral-300">Transaction volume</h2>
+      <h2 className="mb-2 text-sm font-medium text-neutral-300">Transaction volume over time</h2>
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
@@ -23,7 +23,7 @@ export function TrendChart({ trend }: { trend: TrendPoint[] }) {
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="#262626" />
             <XAxis dataKey="time" tick={{ fontSize: 10, fill: "#a3a3a3" }} minTickGap={30} />
-            <YAxis tick={{ fontSize: 10, fill: "#a3a3a3" }} width={36} />
+            <YAxis domain={[0, "auto"]} allowDecimals={false} tick={{ fontSize: 10, fill: "#a3a3a3" }} width={36} />
             <Tooltip contentStyle={{ background: "#171717", border: "1px solid #404040", fontSize: 12 }} />
             <Area type="monotone" dataKey="count" stroke="#3b82f6" fill="url(#volumeFill)" strokeWidth={2} />
           </AreaChart>

@@ -22,18 +22,23 @@ export function OutcomeBreakdown({
   selected?: string;
   onSelect: (outcomeCode: string | undefined) => void;
 }) {
-  const total = outcomes.reduce((sum, o) => sum + o.count, 0);
-  const approved = outcomes.find((o) => o.outcomeCode === "approved")?.count ?? 0;
-  const approvalRate = total > 0 ? ((approved / total) * 100).toFixed(1) : "—";
-
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
       <div className="mb-2 flex items-baseline justify-between">
         <h2 className="text-sm font-medium text-neutral-300">Outcome breakdown</h2>
-        <span className="text-xs text-neutral-400">
-          approval rate: <span className="font-semibold text-emerald-400">{approvalRate}%</span>
-        </span>
+        <div className="flex items-center gap-3 text-[11px] text-neutral-500">
+          <span className="flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-[#22c55e]" /> approved
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-[#f59e0b]" /> soft decline
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-[#ef4444]" /> hard decline
+          </span>
+        </div>
       </div>
+      <p className="mb-2 text-xs text-neutral-500">Click a bar to filter the whole dashboard to that outcome.</p>
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={outcomes} layout="vertical" margin={{ left: 24 }}>
