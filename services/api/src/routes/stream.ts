@@ -49,6 +49,12 @@ export async function registerStreamRoute(app: FastifyInstance) {
     let queued = false;
     let lastSent = Date.now();
 
+    // A trailing update (queued while the current one was in flight) goes
+    // back through trigger() itself rather than looping immediately - that
+    // recomputes `wait` against the *new* lastSent, which is what actually
+    // enforces the 500ms floor. A same-function do/while here would fire
+    // the trailing send with 0ms delay, since it never recalculates wait -
+    // measured live as 512ms/0ms/508ms/0ms under rapid notifications.
     const trigger = () => {
       if (running) {
         queued = true;
@@ -57,12 +63,13 @@ export async function registerStreamRoute(app: FastifyInstance) {
       const wait = Math.max(0, MIN_PUSH_INTERVAL_MS - (Date.now() - lastSent));
       running = true;
       setTimeout(async () => {
-        do {
-          queued = false;
-          await send();
-          lastSent = Date.now();
-        } while (queued);
+        await send();
+        lastSent = Date.now();
         running = false;
+        if (queued) {
+          queued = false;
+          trigger();
+        }
       }, wait);
     };
 
