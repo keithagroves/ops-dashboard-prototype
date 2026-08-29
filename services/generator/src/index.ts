@@ -5,7 +5,6 @@ import {
   MESSAGE_TYPES,
   OUTCOME_CODES,
   TX_FAMILIES,
-  tenantIds,
   type EftVendor,
   type MessageType,
   type OutcomeCode,
@@ -13,10 +12,15 @@ import {
   type TxFamily,
 } from "@nymbus/shared";
 import { config } from "./config";
+import { createIncidentController } from "./incident";
+import { startMetricsServer, type GeneratorMetricsSnapshot } from "./metrics";
+import { createTenantPicker } from "./traffic";
 
-const tenants = tenantIds(config.tenantCount);
-const hotTenantCount = Math.max(1, Math.floor(tenants.length * config.hotTenantFraction));
-const hotTenants = new Set(tenants.slice(0, hotTenantCount));
+const { tenants, pick: pickTenant } = createTenantPicker(
+  config.tenantCount,
+  config.hotTenantFraction,
+  config.hotTenantRatio,
+);
 const sourceSystems = ["conn-01", "conn-02", "conn-03"];
 
 function weightedPick<T extends string>(weights: [T, number][]): T {
@@ -27,15 +31,6 @@ function weightedPick<T extends string>(weights: [T, number][]): T {
     if (r <= 0) return value;
   }
   return weights[weights.length - 1][0];
-}
-
-function pickTenant(): string {
-  const useHot = Math.random() < config.hotTenantRatio;
-  const preferredPool = useHot ? [...hotTenants] : tenants.filter((t) => !hotTenants.has(t));
-  // A tiny demo configuration (or HOT_TENANT_FRACTION=1) can leave the cold
-  // pool empty. Fall back to all tenants rather than emitting `undefined`.
-  const pool = preferredPool.length > 0 ? preferredPool : tenants;
-  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function pickLatencyMs(): number {
@@ -63,22 +58,26 @@ function pickAmountCents(family: TxFamily | null): number | null {
   return Math.round(min + Math.random() * (max - min));
 }
 
-let activeIncident: { tenantId: string; endsAt: number } | null = null;
+const incident = createIncidentController({
+  enabled: config.incidentMode,
+  tenantIndex: config.incidentTenantIndex,
+  tenantId: tenants[config.incidentTenantIndex],
+  outcomeCode: config.incidentOutcome,
+  intervalSec: config.incidentIntervalSec,
+  durationSec: config.incidentDurationSec,
+});
 
 function maybeStartIncident() {
-  if (!config.incidentMode) return;
-  const now = Date.now();
-  if (activeIncident && now < activeIncident.endsAt) return;
-  if (activeIncident && now >= activeIncident.endsAt) {
-    console.log(`[incident] cleared for ${activeIncident.tenantId}`);
-    activeIncident = null;
-  }
-  // Roll a chance each tick proportional to the configured interval.
-  const chancePerTick = 1 / (config.incidentIntervalSec * config.tps);
-  if (Math.random() < chancePerTick) {
-    const tenantId = tenants[config.incidentTenantIndex % tenants.length];
-    activeIncident = { tenantId, endsAt: now + config.incidentDurationSec * 1000 };
-    console.log(`[incident] started for ${tenantId} -> ${config.incidentOutcome} for ${config.incidentDurationSec}s`);
+  for (const transition of incident.tick()) {
+    if (transition.type === "started") {
+      console.log(
+        `[incident] started index=${transition.tenantIndex} tenant=${transition.incident.tenantId} outcome=${transition.incident.outcomeCode} duration=${config.incidentDurationSec}s`,
+      );
+    } else {
+      console.log(
+        `[incident] cleared tenant=${transition.incident.tenantId} outcome=${transition.incident.outcomeCode}`,
+      );
+    }
   }
 }
 
@@ -100,9 +99,10 @@ function buildEvent(): TxEvent {
       : null;
 
   let outcomeCode: OutcomeCode;
+  const activeIncident = incident.current();
   if (activeIncident && tenantId === activeIncident.tenantId && messageType === "auth_request") {
     outcomeCode = weightedPick<OutcomeCode>([
-      [config.incidentOutcome as OutcomeCode, 70],
+      [activeIncident.outcomeCode, 70],
       ["approved", 30],
     ]);
   } else if (messageType !== "auth_request") {
@@ -133,9 +133,8 @@ async function main() {
   await producer.connect();
   console.log(`[generator] connected to Kafka, targeting ${config.tps} TPS`);
 
-  let sent = 0;
-  let dropped = 0;
-  let inFlight = 0;
+  const metrics: GeneratorMetricsSnapshot = { sent: 0, dropped: 0, inFlight: 0 };
+  startMetricsServer(() => ({ ...metrics }), config.metricsPort);
   const MAX_IN_FLIGHT = 500;
   const intervalMs = 1000 / config.tps;
 
@@ -150,31 +149,33 @@ async function main() {
     // memory/backpressure risk by another name, which is exactly what this
     // design is supposed to rule out. Past the cap, a tick is dropped and
     // counted immediately instead of ever calling send().
-    if (inFlight >= MAX_IN_FLIGHT) {
-      dropped += 1;
+    if (metrics.inFlight >= MAX_IN_FLIGHT) {
+      metrics.dropped += 1;
       return;
     }
 
-    inFlight += 1;
+    metrics.inFlight += 1;
     producer
       .send({
         topic: KAFKA_TOPIC,
         messages: [{ key: event.tenantId, value: JSON.stringify(event) }],
       })
       .then(() => {
-        sent += 1;
+        metrics.sent += 1;
       })
       .catch((err) => {
-        dropped += 1;
-        console.warn(`[generator] dropped event (total dropped: ${dropped}): ${err.message}`);
+        metrics.dropped += 1;
+        console.warn(`[generator] dropped event (total dropped: ${metrics.dropped}): ${err.message}`);
       })
       .finally(() => {
-        inFlight -= 1;
+        metrics.inFlight -= 1;
       });
   }, intervalMs);
 
   setInterval(() => {
-    console.log(`[generator] sent=${sent} dropped=${dropped}`);
+    console.log(
+      `[generator] sent=${metrics.sent} dropped=${metrics.dropped} inFlight=${metrics.inFlight}`,
+    );
   }, 5000);
 }
 

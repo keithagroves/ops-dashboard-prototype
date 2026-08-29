@@ -14,12 +14,47 @@ function envNumber(
   return Number.isFinite(value) && valid(value) ? value : fallback;
 }
 
+function requiredNumber(
+  env: Environment,
+  name: string,
+  valid: (value: number) => boolean,
+): number {
+  const raw = env[name];
+  const value = Number(raw);
+  if (!raw?.trim() || !Number.isFinite(value) || !valid(value)) {
+    throw new Error(`${name} is required and must be valid when INCIDENT_MODE=true`);
+  }
+  return value;
+}
+
 export function loadConfig(env: Environment = process.env) {
   const tenantCount = envNumber(env, "TENANT_COUNT", 50, (value) => Number.isInteger(value) && value > 0);
+  const incidentMode = env.INCIDENT_MODE === "true";
   const requestedOutcome = env.INCIDENT_OUTCOME;
-  const incidentOutcome = (OUTCOME_CODES as readonly string[]).includes(requestedOutcome ?? "")
-    ? (requestedOutcome as OutcomeCode)
-    : "insufficient_funds";
+  let incidentTenantIndex = 0;
+  let incidentIntervalSec = 45;
+  let incidentDurationSec = 10;
+  let incidentOutcome: OutcomeCode = "insufficient_funds";
+
+  if (incidentMode) {
+    incidentTenantIndex = requiredNumber(
+      env,
+      "INCIDENT_TENANT_INDEX",
+      (value) => Number.isInteger(value) && value >= 0 && value < tenantCount,
+    );
+    incidentIntervalSec = requiredNumber(env, "INCIDENT_INTERVAL_SEC", (value) => value > 0);
+    incidentDurationSec = requiredNumber(
+      env,
+      "INCIDENT_DURATION_SEC",
+      (value) => value > 0 && value <= incidentIntervalSec,
+    );
+    if (!(OUTCOME_CODES as readonly string[]).includes(requestedOutcome ?? "")) {
+      throw new Error("INCIDENT_OUTCOME is required and must be valid when INCIDENT_MODE=true");
+    }
+    incidentOutcome = requestedOutcome as OutcomeCode;
+  } else if ((OUTCOME_CODES as readonly string[]).includes(requestedOutcome ?? "")) {
+    incidentOutcome = requestedOutcome as OutcomeCode;
+  }
   const kafkaBrokers = (env.KAFKA_BROKERS ?? "")
     .split(",")
     .map((broker) => broker.trim())
@@ -34,18 +69,19 @@ export function loadConfig(env: Environment = process.env) {
     hotTenantFraction: envNumber(env, "HOT_TENANT_FRACTION", 0.1, (value) => value > 0 && value <= 1),
     latencyMeanMs: envNumber(env, "LATENCY_MEAN_MS", 120, (value) => value > 0),
     latencyP99Ms: envNumber(env, "LATENCY_P99_MS", 600, (value) => value > 0),
+    metricsPort: envNumber(
+      env,
+      "METRICS_PORT",
+      9464,
+      (value) => Number.isInteger(value) && value > 0 && value <= 65_535,
+    ),
     // Incident mode: briefly spikes a specific outcome code for a specific
     // tenant so the drill-down demo has something real to find.
-    incidentMode: env.INCIDENT_MODE === "true",
-    incidentTenantIndex: envNumber(
-      env,
-      "INCIDENT_TENANT_INDEX",
-      0,
-      (value) => Number.isInteger(value) && value >= 0 && value < tenantCount,
-    ),
+    incidentMode,
+    incidentTenantIndex,
     incidentOutcome,
-    incidentIntervalSec: envNumber(env, "INCIDENT_INTERVAL_SEC", 45, (value) => value > 0),
-    incidentDurationSec: envNumber(env, "INCIDENT_DURATION_SEC", 10, (value) => value > 0),
+    incidentIntervalSec,
+    incidentDurationSec,
     kafkaBrokers: kafkaBrokers.length > 0 ? kafkaBrokers : ["localhost:9092"],
   };
 }
