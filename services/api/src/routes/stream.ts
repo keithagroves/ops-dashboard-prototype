@@ -4,10 +4,31 @@ import { filtersFromQuery } from "../filters";
 import { onUpdate } from "../redisSub";
 import { authenticate, AuthError } from "../auth";
 import { ValidationError } from "../errors";
+import { createTrailingThrottle } from "../sseThrottle";
 
 const MIN_PUSH_INTERVAL_MS = 500;
 
-export async function registerStreamRoute(app: FastifyInstance) {
+interface StreamRouteDependencies {
+  authenticate: typeof authenticate;
+  filtersFromQuery: typeof filtersFromQuery;
+  validateFilters: typeof validateFilters;
+  runQuery: typeof runQuery;
+  onUpdate: typeof onUpdate;
+}
+
+export async function registerStreamRoute(
+  app: FastifyInstance,
+  overrides: Partial<StreamRouteDependencies> = {},
+) {
+  const dependencies: StreamRouteDependencies = {
+    authenticate,
+    filtersFromQuery,
+    validateFilters,
+    runQuery,
+    onUpdate,
+    ...overrides,
+  };
+
   app.get("/api/stream", async (request, reply) => {
     const query = request.query as Record<string, unknown>;
 
@@ -17,9 +38,9 @@ export async function registerStreamRoute(app: FastifyInstance) {
     // on arrival.
     let filters;
     try {
-      const claims = authenticate(request.headers as Record<string, unknown>, query);
-      filters = filtersFromQuery(query, claims);
-      validateFilters(filters);
+      const claims = dependencies.authenticate(request.headers as Record<string, unknown>, query);
+      filters = dependencies.filtersFromQuery(query, claims);
+      dependencies.validateFilters(filters);
     } catch (err) {
       if (err instanceof AuthError) {
         reply.code(401);
@@ -41,7 +62,7 @@ export async function registerStreamRoute(app: FastifyInstance) {
 
     const send = async () => {
       try {
-        const result = await runQuery(filters);
+        const result = await dependencies.runQuery(filters);
         reply.raw.write(`data: ${JSON.stringify(result)}\n\n`);
       } catch (err) {
         reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: (err as Error).message })}\n\n`);
@@ -50,39 +71,8 @@ export async function registerStreamRoute(app: FastifyInstance) {
 
     await send();
 
-    // A trigger while a send is already in flight sets `queued` rather than
-    // starting a second, overlapping send - otherwise a burst of Redis
-    // notifications during one slow query can fire concurrent queries for
-    // the same connection instead of the intended one-at-a-time cadence.
-    let running = false;
-    let queued = false;
-    let lastSent = Date.now();
-
-    // A trailing update (queued while the current one was in flight) goes
-    // back through trigger() itself rather than looping immediately - that
-    // recomputes `wait` against the *new* lastSent, which is what actually
-    // enforces the 500ms floor. A same-function do/while here would fire
-    // the trailing send with 0ms delay, since it never recalculates wait -
-    // measured live as 512ms/0ms/508ms/0ms under rapid notifications.
-    const trigger = () => {
-      if (running) {
-        queued = true;
-        return;
-      }
-      const wait = Math.max(0, MIN_PUSH_INTERVAL_MS - (Date.now() - lastSent));
-      running = true;
-      setTimeout(async () => {
-        await send();
-        lastSent = Date.now();
-        running = false;
-        if (queued) {
-          queued = false;
-          trigger();
-        }
-      }, wait);
-    };
-
-    const unsubscribe = onUpdate(trigger);
+    const throttle = createTrailingThrottle(send, MIN_PUSH_INTERVAL_MS);
+    const unsubscribe = dependencies.onUpdate(throttle.trigger);
 
     const keepAlive = setInterval(() => {
       reply.raw.write(": keep-alive\n\n");
@@ -91,6 +81,9 @@ export async function registerStreamRoute(app: FastifyInstance) {
     request.raw.on("close", () => {
       clearInterval(keepAlive);
       unsubscribe();
+      // Cancel a notification that was scheduled before the socket closed;
+      // otherwise it can still query and write to a dead response later.
+      throttle.stop();
     });
   });
 }

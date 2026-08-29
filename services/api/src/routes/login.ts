@@ -2,11 +2,20 @@ import type { FastifyInstance } from "fastify";
 import { AuthError, login } from "../auth";
 import { ValidationError } from "../errors";
 
-export async function registerLoginRoute(app: FastifyInstance) {
+interface LoginRouteDependencies {
+  login: typeof login;
+}
+
+export async function registerLoginRoute(
+  app: FastifyInstance,
+  overrides: Partial<LoginRouteDependencies> = {},
+) {
+  const loginUser = overrides.login ?? login;
+
   app.post("/api/login", async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     try {
-      return login(body.username, body.password);
+      return loginUser(body.username, body.password);
     } catch (err) {
       if (err instanceof AuthError) {
         reply.code(401);
