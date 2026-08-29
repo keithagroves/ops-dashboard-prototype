@@ -47,6 +47,11 @@ export function validateTxEvent(value: unknown): value is TxEvent {
   if (!isOneOf(v.eftVendor, EFT_VENDORS)) return false;
   if (!isOneOf(v.messageType, MESSAGE_TYPES)) return false;
   if (v.txFamily !== null && !isOneOf(v.txFamily, TX_FAMILIES)) return false;
+  // Reversal/advice/network-management records do not represent a new
+  // transaction authorization, so Requirement 2.4 requires their family to
+  // be null. Shape validation must enforce the relationship, not just validate
+  // each field independently.
+  if (v.messageType !== "auth_request" && v.txFamily !== null) return false;
   if (!isOneOf(v.outcomeCode, OUTCOME_CODES)) return false;
   if (!isNonEmptyString(v.sourceSystem)) return false;
   if (v.amountCents !== null && !isValidAmountCents(v.amountCents)) return false;
