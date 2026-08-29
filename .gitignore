@@ -8,3 +8,7 @@ dist/
 # editor/tool-generated caches, not source
 .codeswim/
 .DS_Store
+
+# the exercise brief itself - Nymbus's material, not part of the solution
+Architect - Take-Home Exercise Final.pdf
+take-home-exercise.md
