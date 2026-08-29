@@ -4,9 +4,11 @@ import {
   MESSAGE_TYPES,
   OUTCOME_CODES,
   TX_FAMILIES,
+  tenantIds,
   type DrilldownRow,
   type QueryFilters,
   type QueryResult,
+  type TenantHealthPoint,
 } from "@nymbus/shared";
 import { ValidationError } from "./errors";
 
@@ -63,16 +65,30 @@ export function validateFilters(filters: QueryFilters): void {
   }
 }
 
-function buildWhere(filters: QueryFilters): { clause: string; params: unknown[] } {
+// Exported for tests: the tenant-scoping rules below are the security
+// boundary of this service, and asserting them directly is worth more than
+// inferring them from a query result.
+export function buildWhere(
+  filters: QueryFilters,
+  opts: { window?: "current" | "previous" } = {},
+): { clause: string; params: unknown[] } {
   validateFilters(filters);
+  // windowMinutes is validated against a fixed allow-list above, so it is
+  // safe to interpolate into the interval literal here.
   const windowMinutes = filters.windowMinutes ?? 15;
-  const conditions: string[] = [`event_ts > now() - interval '${windowMinutes} minutes'`];
+  const conditions: string[] =
+    opts.window === "previous"
+      ? [
+          `event_ts > now() - interval '${windowMinutes * 2} minutes'`,
+          `event_ts <= now() - interval '${windowMinutes} minutes'`,
+        ]
+      : [`event_ts > now() - interval '${windowMinutes} minutes'`];
   const params: unknown[] = [];
 
   // Server-side tenant scoping: a tenant-role caller is always constrained
-  // to their own tenant regardless of any other value in the request. In
-  // production this comes from a verified JWT claim, not a request field -
-  // the prototype takes tenantId as a plain param to stand in for that claim.
+  // to the tenant in its verified JWT, regardless of any other value in the
+  // request. The prototype's identity directory is synthetic, but the claim
+  // verification and query enforcement are real.
   if (filters.role === "tenant") {
     params.push(filters.tenantId);
     conditions.push(`tenant_id = $${params.length}`);
@@ -133,7 +149,74 @@ interface CacheEntry {
 
 const queryCache = new Map<string, CacheEntry>();
 
+// The tenant navigator answers a platform question ("which institution needs
+// attention?") rather than a detail-panel question ("show vendor-a rows").
+// Keying this small cache only by window keeps vendor/type/outcome changes
+// from re-running and reordering the navigator, while still refreshing it on
+// a short independent cadence.
+const TENANT_HEALTH_CACHE_TTL_MS = 2_000;
+interface TenantHealthCacheEntry {
+  promise: Promise<TenantHealthPoint[]>;
+  settledAt: number | null;
+}
+const tenantHealthCache = new Map<number, TenantHealthCacheEntry>();
+
+const nullableNumber = (value: unknown): number | null => (value != null ? Number(value) : null);
+const approvalRate = (approved: unknown, total: unknown): number | null => {
+  const count = Number(total);
+  return count > 0 ? Number(approved) / count : null;
+};
+
+async function queryTenantHealth(windowMinutes: number): Promise<TenantHealthPoint[]> {
+  const result = await pool.query(`
+    SELECT tenant_id,
+           count(*) AS total,
+           count(*) FILTER (WHERE outcome_code = 'approved') AS approved,
+           percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
+    FROM tx_events
+    WHERE event_ts > now() - interval '${windowMinutes} minutes'
+    GROUP BY tenant_id
+  `);
+  const byTenant = new Map(
+    result.rows.map((row) => [
+      String(row.tenant_id),
+      {
+        tenantId: String(row.tenant_id),
+        count: Number(row.total),
+        approvalRate: approvalRate(row.approved, row.total),
+        p95: nullableNumber(row.p95),
+      },
+    ]),
+  );
+  return tenantIds(50).map(
+    (tenantId) => byTenant.get(tenantId) ?? { tenantId, count: 0, approvalRate: null, p95: null },
+  );
+}
+
+function runTenantHealth(windowMinutes: number): Promise<TenantHealthPoint[]> {
+  const cached = tenantHealthCache.get(windowMinutes);
+  if (cached && (cached.settledAt === null || Date.now() - cached.settledAt < TENANT_HEALTH_CACHE_TTL_MS)) {
+    return cached.promise;
+  }
+  if (cached) tenantHealthCache.delete(windowMinutes);
+
+  const entry: TenantHealthCacheEntry = { promise: undefined as unknown as Promise<TenantHealthPoint[]>, settledAt: null };
+  entry.promise = queryTenantHealth(windowMinutes);
+  entry.promise.then(
+    () => {
+      entry.settledAt = Date.now();
+    },
+    () => tenantHealthCache.delete(windowMinutes),
+  );
+  tenantHealthCache.set(windowMinutes, entry);
+  return entry.promise;
+}
+
 export async function runQuery(filters: QueryFilters): Promise<QueryResult> {
+  // Validate before computing a cache key. Besides failing fast, this avoids
+  // malformed numeric values such as NaN being normalized to `null` by
+  // JSON.stringify and sharing a cache entry with a different request.
+  validateFilters(filters);
   const key = JSON.stringify(filters);
   const cached = queryCache.get(key);
 
@@ -177,7 +260,8 @@ async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
 
   const trendSql = `
     SELECT to_timestamp(floor(extract(epoch from event_ts) / ${bucketSeconds}) * ${bucketSeconds}) AS bucket,
-           count(*) AS count
+           count(*) AS count,
+           percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
     FROM tx_events
     WHERE ${clause}
     GROUP BY bucket
@@ -189,14 +273,7 @@ async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
     FROM tx_events
     WHERE ${clause}
     GROUP BY outcome_code
-    ORDER BY count DESC
-  `;
-
-  const latencySql = `
-    SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50,
-           percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
-    FROM tx_events
-    WHERE ${clause}
+    ORDER BY count DESC, outcome_code ASC
   `;
 
   const rowsSql = `
@@ -208,22 +285,64 @@ async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
     LIMIT 50
   `;
 
-  const countSql = `SELECT count(*) FROM tx_events WHERE ${clause}`;
+  // Current and previous aggregates share one statement. This replaces the
+  // former latency, count and previous-window queries, reducing a global
+  // refresh from seven pool acquisitions to five while keeping the response
+  // shape and period comparison exact.
+  const prev = buildWhere(filters, { window: "previous" });
+  const shiftPlaceholders = (sql: string, offset: number) =>
+    sql.replace(/\$(\d+)/g, (_match, n: string) => `$${Number(n) + offset}`);
+  const shiftedPrevClause = shiftPlaceholders(prev.clause, params.length);
+  const statsSql = `
+    SELECT 'current'::text AS period,
+           count(*) AS total,
+           count(*) FILTER (WHERE outcome_code = 'approved') AS approved,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50,
+           percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
+    FROM tx_events
+    WHERE ${clause}
+    UNION ALL
+    SELECT 'previous'::text AS period,
+           count(*) AS total,
+           count(*) FILTER (WHERE outcome_code = 'approved') AS approved,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50,
+           percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
+    FROM tx_events
+    WHERE ${shiftedPrevClause}
+  `;
 
-  const [trendRes, outcomesRes, latencyRes, rowsRes, countRes] = await Promise.all([
+  // Cross-tenant health is platform navigation context. It intentionally
+  // follows only the selected time window, not detail filters or the current
+  // tenant drill-down; otherwise changing vendor makes the tenant navigator
+  // disappear, reorder, and run another aggregate query. Tenant callers never
+  // receive it, so this cannot widen a tenant-scoped session.
+  const wantTenants = filters.role === "global";
+
+  const [trendRes, outcomesRes, rowsRes, statsRes, tenants] = await Promise.all([
     pool.query(trendSql, params),
     pool.query(outcomesSql, params),
-    pool.query(latencySql, params),
     pool.query(rowsSql, params),
-    pool.query(countSql, params),
+    pool.query(statsSql, [...params, ...prev.params]),
+    wantTenants ? runTenantHealth(windowMinutes) : Promise.resolve([] as TenantHealthPoint[]),
   ]);
 
+  const currentRow = statsRes.rows.find((r) => r.period === "current") ?? {};
+  const prevRow = statsRes.rows.find((r) => r.period === "previous") ?? {};
+
   return {
-    trend: trendRes.rows.map((r) => ({ bucket: r.bucket, count: Number(r.count) })),
+    trend: trendRes.rows.map((r) => ({ bucket: r.bucket, count: Number(r.count), p95: nullableNumber(r.p95) })),
+    previous: {
+      totalCount: Number(prevRow.total ?? 0),
+      p50: nullableNumber(prevRow.p50),
+      p95: nullableNumber(prevRow.p95),
+      approvalRate: approvalRate(prevRow.approved, prevRow.total),
+    },
+    tenants,
+    generatedAt: new Date().toISOString(),
     outcomes: outcomesRes.rows.map((r) => ({ outcomeCode: r.outcome_code, count: Number(r.count) })),
     latency: {
-      p50: latencyRes.rows[0]?.p50 != null ? Number(latencyRes.rows[0].p50) : null,
-      p95: latencyRes.rows[0]?.p95 != null ? Number(latencyRes.rows[0].p95) : null,
+      p50: nullableNumber(currentRow.p50),
+      p95: nullableNumber(currentRow.p95),
     },
     rows: rowsRes.rows.map(
       (r): DrilldownRow => ({
@@ -239,6 +358,6 @@ async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
         latencyMs: Number(r.latency_ms),
       }),
     ),
-    totalCount: Number(countRes.rows[0]?.count ?? 0),
+    totalCount: Number(currentRow.total ?? 0),
   };
 }

@@ -8,9 +8,15 @@ import { validateTxEvent } from "./validate";
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || "localhost:9092").split(",");
 const PG_URL = process.env.DATABASE_URL || "postgres://nymbus:nymbus@localhost:5433/ops_dashboard";
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const RETENTION_MINUTES = Number(process.env.RETENTION_MINUTES || 30);
+// The largest dashboard window is 30 minutes and headline deltas compare it
+// with the immediately preceding 30 minutes, so the prototype must retain at
+// least 60 minutes for that comparison to be meaningful.
+const RETENTION_MINUTES = Number(process.env.RETENTION_MINUTES || 60);
 
 async function main() {
+  if (!Number.isInteger(RETENTION_MINUTES) || RETENTION_MINUTES < 60) {
+    throw new Error("RETENTION_MINUTES must be an integer of at least 60");
+  }
   const pool = new Pool({ connectionString: PG_URL });
   // Both pg's Pool and ioredis's client are EventEmitters that throw and
   // crash the process on an unhandled 'error' event - discovered by

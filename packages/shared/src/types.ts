@@ -39,6 +39,28 @@ export const REDIS_UPDATE_CHANNEL = "tx:updates";
 
 export type Role = "tenant" | "global";
 
+/**
+ * What the API derives a caller's scope from. In production these arrive in a
+ * verified JWT issued by the platform's existing identity provider; the
+ * prototype issues its own from a hardcoded demo user directory.
+ */
+export interface AuthClaims {
+  sub: string;
+  role: Role;
+  /** Present (and enforced) only for role=tenant. */
+  tenantId?: string;
+}
+
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  token: string;
+  claims: AuthClaims;
+}
+
 export interface QueryFilters {
   role: Role;
   tenantId?: string;
@@ -53,6 +75,23 @@ export interface QueryFilters {
 export interface TrendPoint {
   bucket: string;
   count: number;
+  p95: number | null;
+}
+
+/** Aggregate stats for a single window, used to show deltas vs. the prior period. */
+export interface WindowStats {
+  totalCount: number;
+  p50: number | null;
+  p95: number | null;
+  approvalRate: number | null; // 0..1
+}
+
+/** Per-tenant health, populated only for role=global cross-tenant views. */
+export interface TenantHealthPoint {
+  tenantId: string;
+  count: number;
+  approvalRate: number | null; // 0..1
+  p95: number | null;
 }
 
 export interface OutcomeBreakdownPoint {
@@ -84,4 +123,10 @@ export interface QueryResult {
   latency: LatencyStats;
   rows: DrilldownRow[];
   totalCount: number;
+  /** Same aggregates over the immediately preceding window of equal length. */
+  previous: WindowStats;
+  /** Per-tenant health for cross-tenant (global) views; empty otherwise. */
+  tenants: TenantHealthPoint[];
+  /** Server timestamp this result was computed, ISO string. */
+  generatedAt: string;
 }
