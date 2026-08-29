@@ -4,9 +4,15 @@ import { useEffect, useState } from "react";
 import type { QueryFilters, QueryResult, TenantHealthPoint } from "@nymbus/shared";
 import { buildUrl } from "./queryUrl";
 import { sameTenantHealth } from "./tenantHealth";
+import { isSameScope, scopeKeyOf } from "./sseScope";
 
 export function useSse(filters: QueryFilters, token: string) {
-  const [snapshot, setSnapshot] = useState<{ key: string; data: QueryResult; receivedAt: number } | null>(null);
+  const [snapshot, setSnapshot] = useState<{
+    key: string;
+    scope: string;
+    data: QueryResult;
+    receivedAt: number;
+  } | null>(null);
   const [connectedKey, setConnectedKey] = useState<string | null>(null);
   // Tenant health is navigation context, not filter-scoped panel data. Keep
   // the last list for this exact token while a replacement filtered stream
@@ -16,6 +22,7 @@ export function useSse(filters: QueryFilters, token: string) {
   // reuses this hook without remounting on account change, a prior user's
   // snapshot can never be rendered under the new scope.
   const key = JSON.stringify([token, filters]);
+  const scope = scopeKeyOf(filters, token);
 
   useEffect(() => {
     // Reopening the connection on filter change (rather than tracking
@@ -36,7 +43,7 @@ export function useSse(filters: QueryFilters, token: string) {
               : { token, tenants: data.tenants },
           );
         }
-        setSnapshot({ key, data, receivedAt: Date.now() });
+        setSnapshot({ key, scope, data, receivedAt: Date.now() });
       } catch {
         // ignore malformed frame
       }
@@ -55,10 +62,23 @@ export function useSse(filters: QueryFilters, token: string) {
   // Scope the returned state synchronously during render. Effects run after a
   // paint, so merely clearing state inside the effect still flashes the old
   // tenant/global payload for one render after a filter change.
+  const isCurrent = snapshot?.key === key;
+
+  // A snapshot from the same scope but a stale filter stays on screen while the
+  // replacement stream connects, so the panels keep their dimensions instead of
+  // collapsing to a loading line and snapping back. It is surfaced as `stale`
+  // rather than passed off as live: the caller dims it and blocks interaction,
+  // and the live indicator says "updating". A snapshot from a *different*
+  // scope is never reused - see scopeKeyOf.
+  const reusable = !isCurrent && snapshot != null && isSameScope(snapshot.scope, scope);
+
   return {
-    data: snapshot?.key === key ? snapshot.data : null,
+    data: isCurrent ? snapshot.data : reusable ? snapshot.data : null,
+    stale: reusable,
     connected: connectedKey === key,
-    lastEventAt: snapshot?.key === key ? snapshot.receivedAt : null,
+    // Only a current snapshot has a meaningful age; a stale one would make the
+    // indicator claim data is fresher than the filter it belongs to.
+    lastEventAt: isCurrent ? snapshot.receivedAt : null,
     tenants: tenantSnapshot?.token === token ? tenantSnapshot.tenants : [],
   };
 }

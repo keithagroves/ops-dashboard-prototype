@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import type { TrendPoint } from "@nymbus/shared";
+import { Panel } from "./Panel";
 
 const SLA_MS = 500;
 
@@ -26,8 +27,7 @@ export function LatencyTrendChart({ trend }: { trend: TrendPoint[] }) {
   const yMax = Math.max(600, Math.ceil((peak * 1.15) / 100) * 100);
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
-      <h2 className="mb-2 text-sm font-medium text-neutral-300">p95 latency over time</h2>
+    <Panel title="p95 latency over time">
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
@@ -56,6 +56,6 @@ export function LatencyTrendChart({ trend }: { trend: TrendPoint[] }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
-    </div>
+    </Panel>
   );
 }

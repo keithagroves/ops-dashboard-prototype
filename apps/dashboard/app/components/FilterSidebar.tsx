@@ -80,6 +80,7 @@ export function FilterSidebar({
   claims,
   onSignOut,
   onClearAll,
+  updating,
 }: {
   filters: QueryFilters;
   onChange: (patch: Partial<QueryFilters>) => void;
@@ -88,6 +89,7 @@ export function FilterSidebar({
   claims: AuthClaims;
   onSignOut: () => void;
   onClearAll: () => void;
+  updating: boolean;
 }) {
   // LiveIndicator changes every second, which re-renders this shell. Stable
   // callbacks plus memoized controls keep those clock ticks from re-rendering
@@ -125,7 +127,7 @@ export function FilterSidebar({
     <aside className="order-first flex w-full shrink-0 flex-col self-start rounded-lg border border-neutral-800 bg-neutral-950 lg:sticky lg:top-6 lg:order-last lg:max-h-[calc(100vh-3rem)] lg:w-60">
       <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
         <h2 className="text-sm font-medium text-neutral-300">Filters</h2>
-        <LiveIndicator connected={connected} lastEventAt={lastEventAt} />
+        <LiveIndicator connected={connected} lastEventAt={lastEventAt} updating={updating} />
       </div>
 
       <div className="flex flex-col gap-3 overflow-y-auto p-3">

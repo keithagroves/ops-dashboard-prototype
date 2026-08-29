@@ -2,6 +2,7 @@
 
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { TrendPoint } from "@nymbus/shared";
+import { Panel } from "./Panel";
 
 export function TrendChart({ trend }: { trend: TrendPoint[] }) {
   const data = trend.map((t) => ({
@@ -10,8 +11,7 @@ export function TrendChart({ trend }: { trend: TrendPoint[] }) {
   }));
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
-      <h2 className="mb-2 text-sm font-medium text-neutral-300">Transaction volume over time</h2>
+    <Panel title="Transaction volume over time">
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
@@ -29,6 +29,6 @@ export function TrendChart({ trend }: { trend: TrendPoint[] }) {
           </AreaChart>
         </ResponsiveContainer>
       </div>
-    </div>
+    </Panel>
   );
 }

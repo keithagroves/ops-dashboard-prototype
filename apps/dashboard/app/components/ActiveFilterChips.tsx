@@ -19,11 +19,26 @@ function ActiveFilterChipsView({
   onClearAll: () => void;
 }) {
   const active = activeFilters(filters);
-  if (active.length === 0) return null;
+  const isEmpty = active.length === 0;
 
+  // One wrapper for both states, so applying the first filter cannot change
+  // the row's height and shove the KPIs and charts down the page. Only the
+  // colours and contents differ; the box does not. The empty state states the
+  // unfiltered case rather than sitting there as a blank reserved gap.
+  //
+  // The height is pinned to what a row of chips occupies (a chip is taller
+  // than bare text by its border and padding), not to the empty state.
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border border-blue-900 bg-blue-950/40 px-3 py-2">
-      <span className="text-xs text-blue-400/80">Filtered by</span>
+    <div
+      className={`flex min-h-10 flex-wrap items-center gap-2 rounded-md border px-3 py-2 ${
+        isEmpty ? "border-neutral-900" : "border-blue-900 bg-blue-950/40"
+      }`}
+    >
+      {isEmpty ? (
+        <span className="text-xs text-neutral-600">No filters — showing all traffic</span>
+      ) : (
+        <span className="text-xs text-blue-400/80">Filtered by</span>
+      )}
 
       {active.map(({ key, label, value }) => (
         <span

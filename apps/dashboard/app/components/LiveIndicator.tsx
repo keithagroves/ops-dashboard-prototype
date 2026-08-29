@@ -10,9 +10,12 @@ import { useEffect, useState } from "react";
 export function LiveIndicator({
   connected,
   lastEventAt,
+  updating = false,
 }: {
   connected: boolean;
   lastEventAt: number | null;
+  /** A new stream is connecting; what is on screen belongs to older filters. */
+  updating?: boolean;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -22,16 +25,20 @@ export function LiveIndicator({
 
   const ageSec = lastEventAt == null ? null : Math.max(0, Math.round((now - lastEventAt) / 1000));
   const stale = ageSec != null && ageSec > 10;
-  const dotColor = !connected ? "bg-red-500" : stale ? "bg-amber-500" : "bg-emerald-500";
+  // "updating" is a normal transition, not a fault, so it keeps the healthy dot
+  // - unlike a disconnect (red) or a stream that has gone quiet (amber).
+  const dotColor = !connected && !updating ? "bg-red-500" : stale ? "bg-amber-500" : "bg-emerald-500";
 
   return (
     <div className="flex items-center gap-2 text-xs text-neutral-400">
       <span className={`h-2 w-2 rounded-full ${dotColor}`} />
-      {!connected
-        ? "disconnected"
-        : ageSec == null
-          ? "connecting…"
-          : `updated ${ageSec}s ago`}
+      {updating
+        ? "updating…"
+        : !connected
+          ? "disconnected"
+          : ageSec == null
+            ? "connecting…"
+            : `updated ${ageSec}s ago`}
     </div>
   );
 }

@@ -2,6 +2,7 @@
 
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { OutcomeBreakdownPoint } from "@nymbus/shared";
+import { Panel } from "./Panel";
 
 const COLORS: Record<string, string> = {
   approved: "#22c55e",
@@ -27,9 +28,9 @@ export function OutcomeBreakdown({
   // can still see is "in", so dimming would imply a narrowing that isn't there.
   const isSelected = (code: string) => !selected || selected.length === 0 || selected.includes(code);
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
-      <div className="mb-2 flex items-baseline justify-between">
-        <h2 className="text-sm font-medium text-neutral-300">Outcome breakdown</h2>
+    <Panel
+      title="Outcome breakdown"
+      aside={
         <div className="flex items-center gap-3 text-[11px] text-neutral-500">
           <span className="flex items-center gap-1">
             <span className="h-2 w-2 rounded-full bg-[#22c55e]" /> approved
@@ -41,8 +42,11 @@ export function OutcomeBreakdown({
             <span className="h-2 w-2 rounded-full bg-[#ef4444]" /> hard decline
           </span>
         </div>
-      </div>
-      <p className="mb-2 text-xs text-neutral-500">Click a bar to filter the whole dashboard to that outcome.</p>
+      }
+      note={
+        <p className="mb-2 text-xs text-neutral-500">Click a bar to filter the whole dashboard to that outcome.</p>
+      }
+    >
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={outcomes} layout="vertical" margin={{ left: 24 }}>
@@ -69,6 +73,6 @@ export function OutcomeBreakdown({
           </BarChart>
         </ResponsiveContainer>
       </div>
-    </div>
+    </Panel>
   );
 }

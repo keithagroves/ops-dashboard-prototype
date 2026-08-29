@@ -11,6 +11,7 @@ import { TenantHealthSidebar } from "./components/TenantHealthSidebar";
 import { DrilldownTable } from "./components/DrilldownTable";
 import { LoginScreen } from "./components/LoginScreen";
 import { ActiveFilterChips } from "./components/ActiveFilterChips";
+import { DashboardSkeleton } from "./components/DashboardSkeleton";
 import { useSse } from "./lib/useSse";
 import { useAuth } from "./lib/auth";
 import { approvalRateOf } from "./lib/stats";
@@ -43,7 +44,7 @@ function Dashboard({
     tenantId: claims.role === "tenant" ? claims.tenantId : undefined,
     windowMinutes: 15,
   });
-  const { data, connected, lastEventAt, tenants } = useSse(filters, token);
+  const { data, stale, connected, lastEventAt, tenants } = useSse(filters, token);
 
   const patch = useCallback((p: Partial<QueryFilters>) => setFilters((f) => ({ ...f, ...p })), []);
   const selectTenant = useCallback((tenantId: string | undefined) => patch({ tenantId }), [patch]);
@@ -90,9 +91,21 @@ function Dashboard({
           <ActiveFilterChips filters={filters} onClear={clearFilter} onClearAll={clearAll} />
 
           {!data ? (
-            <p className="text-sm text-neutral-500">Waiting for data…</p>
+            <DashboardSkeleton />
           ) : (
-            <>
+            // While a replacement stream connects, the previous same-scope
+            // payload stays in place dimmed and inert: it keeps the layout
+            // from collapsing, but it must not be readable as current or
+            // clickable, or an operator could drill into a bar that no longer
+            // reflects the filters on screen.
+            <div
+              className={
+                stale
+                  ? "pointer-events-none flex flex-col gap-4 opacity-40 transition-opacity duration-150"
+                  : "flex flex-col gap-4 transition-opacity duration-150"
+              }
+              aria-busy={stale}
+            >
               <KpiRow
                 latency={data.latency}
                 totalCount={data.totalCount}
@@ -112,7 +125,7 @@ function Dashboard({
               />
 
               <DrilldownTable rows={data.rows} />
-            </>
+            </div>
           )}
         </div>
 
@@ -124,6 +137,7 @@ function Dashboard({
           claims={claims}
           onSignOut={onSignOut}
           onClearAll={clearAll}
+          updating={stale}
         />
       </div>
     </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import type { DrilldownRow } from "@nymbus/shared";
+import { Panel } from "./Panel";
 
 const OUTCOME_STYLE: Record<string, string> = {
   approved: "text-emerald-400",
@@ -8,8 +9,7 @@ const OUTCOME_STYLE: Record<string, string> = {
 
 export function DrilldownTable({ rows }: { rows: DrilldownRow[] }) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
-      <h2 className="mb-2 text-sm font-medium text-neutral-300">Recent transactions ({rows.length})</h2>
+    <Panel title={`Recent transactions (${rows.length})`}>
       <div className="max-h-80 overflow-auto">
         <table className="w-full text-left text-xs">
           <thead className="sticky top-0 bg-neutral-950 text-neutral-500">
@@ -40,6 +40,6 @@ export function DrilldownTable({ rows }: { rows: DrilldownRow[] }) {
           </tbody>
         </table>
       </div>
-    </div>
+    </Panel>
   );
 }
