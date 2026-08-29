@@ -132,15 +132,27 @@ async function main() {
 
   let sent = 0;
   let dropped = 0;
+  let inFlight = 0;
+  const MAX_IN_FLIGHT = 500;
   const intervalMs = 1000 / config.tps;
 
   setInterval(() => {
     maybeStartIncident();
     const event = buildEvent();
 
-    // Fire-and-forget: never await this on the "hot path". A failed produce
-    // is dropped and counted, exactly mirroring the real constraint that a
-    // metrics-subsystem failure must never affect transaction processing.
+    // Bounded fire-and-forget: never await the produce call on the "hot
+    // path", but also never let unresolved sends accumulate without limit.
+    // Under sustained broker degradation, kafkajs's own internal retries
+    // would otherwise let in-flight promises pile up indefinitely - that's
+    // memory/backpressure risk by another name, which is exactly what this
+    // design is supposed to rule out. Past the cap, a tick is dropped and
+    // counted immediately instead of ever calling send().
+    if (inFlight >= MAX_IN_FLIGHT) {
+      dropped += 1;
+      return;
+    }
+
+    inFlight += 1;
     producer
       .send({
         topic: KAFKA_TOPIC,
@@ -152,6 +164,9 @@ async function main() {
       .catch((err) => {
         dropped += 1;
         console.warn(`[generator] dropped event (total dropped: ${dropped}): ${err.message}`);
+      })
+      .finally(() => {
+        inFlight -= 1;
       });
   }, intervalMs);
 
