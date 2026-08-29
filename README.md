@@ -118,7 +118,8 @@ either a security hole or a silently wrong number, not the React rendering.
   that `buildWhere` parameterizes every attacker-influenced value while always
   applying the claim-derived tenant predicate.
 - `apps/dashboard/app/lib/*.test.ts` — approval-rate maths (empty window is
-  `null`, not `0`) and the tenant-health thresholds.
+  `null`, not `0`), the tenant-health thresholds, and which filters are
+  presented as dismissible (a tenant session's own tenant is not one).
 
 The two tenant-scoping tests were verified by deliberately reintroducing each
 bug and confirming the suite goes red, rather than trusting a green run.

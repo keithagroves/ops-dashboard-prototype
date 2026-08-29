@@ -10,6 +10,8 @@ import {
   type QueryFilters,
 } from "@nymbus/shared";
 import { LiveIndicator } from "./LiveIndicator";
+import { SegmentedControl, type Segment } from "./SegmentedControl";
+import { hasActiveFilters } from "../lib/activeFilters";
 
 interface SelectOption {
   value: string;
@@ -32,10 +34,12 @@ const OUTCOME_OPTIONS: SelectOption[] = [
   { value: "", label: "All outcomes" },
   ...OUTCOME_CODES.map((value) => ({ value, label: value })),
 ];
-const WINDOW_OPTIONS: SelectOption[] = [
-  { value: "5", label: "Last 5 min" },
-  { value: "15", label: "Last 15 min" },
-  { value: "30", label: "Last 30 min" },
+// Three exclusive options changed constantly during triage: visible as a
+// segmented control rather than hidden behind a dropdown.
+const WINDOW_SEGMENTS: Segment[] = [
+  { value: "5", label: "5m" },
+  { value: "15", label: "15m" },
+  { value: "30", label: "30m" },
 ];
 
 const Select = memo(function Select({
@@ -74,6 +78,7 @@ export function FilterSidebar({
   lastEventAt,
   claims,
   onSignOut,
+  onClearAll,
 }: {
   filters: QueryFilters;
   onChange: (patch: Partial<QueryFilters>) => void;
@@ -81,6 +86,7 @@ export function FilterSidebar({
   lastEventAt: number | null;
   claims: AuthClaims;
   onSignOut: () => void;
+  onClearAll: () => void;
 }) {
   // SSE freshness props update this shell for every frame. Stable callbacks
   // plus memoized Select controls keep those updates from re-rendering every
@@ -114,6 +120,13 @@ export function FilterSidebar({
       </div>
 
       <div className="flex flex-col gap-3 overflow-y-auto p-3">
+        <SegmentedControl
+          label="Window"
+          value={String(filters.windowMinutes ?? 15)}
+          options={WINDOW_SEGMENTS}
+          onChange={changeWindow}
+        />
+
         <Select
           label="EFT vendor"
           value={filters.eftVendor || ""}
@@ -142,12 +155,14 @@ export function FilterSidebar({
           options={OUTCOME_OPTIONS}
         />
 
-        <Select
-          label="Window"
-          value={String(filters.windowMinutes ?? 15)}
-          onChange={changeWindow}
-          options={WINDOW_OPTIONS}
-        />
+        {hasActiveFilters(filters) && (
+          <button
+            onClick={onClearAll}
+            className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            Reset filters
+          </button>
+        )}
       </div>
 
       {/*

@@ -10,9 +10,11 @@ import { OutcomeBreakdown } from "./components/OutcomeBreakdown";
 import { TenantHealthSidebar } from "./components/TenantHealthSidebar";
 import { DrilldownTable } from "./components/DrilldownTable";
 import { LoginScreen } from "./components/LoginScreen";
+import { ActiveFilterChips } from "./components/ActiveFilterChips";
 import { useSse } from "./lib/useSse";
 import { useAuth } from "./lib/auth";
 import { approvalRateOf } from "./lib/stats";
+import { clearAllFilters, type ClearableKey } from "./lib/activeFilters";
 
 export default function Home() {
   const { token, claims, ready, signIn, signOut } = useAuth();
@@ -50,12 +52,14 @@ function Dashboard({
     [patch],
   );
 
+  const clearFilter = useCallback((key: ClearableKey) => patch({ [key]: undefined }), [patch]);
+  const clearAll = useCallback(() => setFilters(clearAllFilters), []);
+
   const isGlobal = claims.role === "global";
   // The tenant list stays up while drilled in — it's the navigator, so you can
   // click straight from one tenant to the next. A tenant-role session never
   // gets it: the API doesn't return other tenants to that caller at all.
   const showSidebar = isGlobal;
-  const showTenantBanner = isGlobal && !!filters.tenantId;
 
   return (
     <div className="mx-auto flex max-w-[95rem] flex-col gap-4 p-6">
@@ -80,21 +84,7 @@ function Dashboard({
         )}
 
         <div className="flex min-w-0 flex-1 flex-col gap-4">
-          {showTenantBanner && (
-            <div className="flex items-center gap-2 rounded-md border border-blue-800 bg-blue-950/50 px-3 py-2 text-sm text-blue-300">
-              <span>
-                Viewing tenant:{" "}
-                <span className="font-semibold text-blue-200">{filters.tenantId}</span>
-              </span>
-              <button
-                onClick={() => patch({ tenantId: undefined })}
-                className="ml-auto rounded px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-900 hover:text-blue-200"
-                aria-label="Clear tenant filter"
-              >
-                ✕ clear
-              </button>
-            </div>
-          )}
+          <ActiveFilterChips filters={filters} onClear={clearFilter} onClearAll={clearAll} />
 
           {!data ? (
             <p className="text-sm text-neutral-500">Waiting for data…</p>
@@ -130,6 +120,7 @@ function Dashboard({
           lastEventAt={lastEventAt}
           claims={claims}
           onSignOut={onSignOut}
+          onClearAll={clearAll}
         />
       </div>
     </div>
