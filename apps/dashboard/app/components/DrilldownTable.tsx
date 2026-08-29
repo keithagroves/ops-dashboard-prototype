@@ -10,7 +10,12 @@ const OUTCOME_STYLE: Record<string, string> = {
 export function DrilldownTable({ rows }: { rows: DrilldownRow[] }) {
   return (
     <Panel title={`Recent transactions (${rows.length})`}>
-      <div className="max-h-80 overflow-auto">
+      {rows.length === 0 ? (
+        <p className="flex h-24 items-center justify-center text-sm text-neutral-500">
+          No transactions are available for the selected window.
+        </p>
+      ) : (
+        <div className="max-h-80 overflow-auto">
         <table className="w-full text-left text-xs">
           <thead className="sticky top-0 bg-neutral-950 text-neutral-500">
             <tr>
@@ -40,6 +45,7 @@ export function DrilldownTable({ rows }: { rows: DrilldownRow[] }) {
           </tbody>
         </table>
       </div>
+      )}
     </Panel>
   );
 }

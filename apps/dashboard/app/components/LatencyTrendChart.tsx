@@ -28,7 +28,12 @@ export function LatencyTrendChart({ trend }: { trend: TrendPoint[] }) {
 
   return (
     <Panel title="p95 latency over time">
-      <div className="h-56">
+      {data.length === 0 ? (
+        <p className="flex h-56 items-center justify-center text-sm text-neutral-500">
+          No latency data is available for the selected window.
+        </p>
+      ) : (
+        <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#262626" />
@@ -56,6 +61,7 @@ export function LatencyTrendChart({ trend }: { trend: TrendPoint[] }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
+      )}
     </Panel>
   );
 }
