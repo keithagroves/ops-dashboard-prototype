@@ -44,7 +44,7 @@ function Dashboard({
     tenantId: claims.role === "tenant" ? claims.tenantId : undefined,
     windowMinutes: 15,
   });
-  const { data, stale, connected, lastEventAt, tenants } = useSse(filters, token);
+  const { data, stale, connected, lastEventAt, tenants, error } = useSse(filters, token);
 
   const patch = useCallback((p: Partial<QueryFilters>) => setFilters((f) => ({ ...f, ...p })), []);
   const selectTenant = useCallback((tenantId: string | undefined) => patch({ tenantId }), [patch]);
@@ -90,6 +90,12 @@ function Dashboard({
         <div className="flex min-w-0 flex-1 flex-col gap-4">
           <ActiveFilterChips filters={filters} onClear={clearFilter} onClearAll={clearAll} />
 
+          {error && (
+            <p role="alert" className="rounded border border-red-900 bg-red-950/50 px-3 py-2 text-xs text-red-300">
+              {error}; showing the last valid data while the live stream continues.
+            </p>
+          )}
+
           {!data ? (
             <DashboardSkeleton />
           ) : (
@@ -98,11 +104,20 @@ function Dashboard({
             // from collapsing, but it must not be readable as current or
             // clickable, or an operator could drill into a bar that no longer
             // reflects the filters on screen.
+            //
+            // The dim is delayed on the way in and immediate on the way out.
+            // Re-selecting a combination you just looked at is answered from
+            // the API's short-lived query cache, so the reply can beat the
+            // delay entirely - and a fade that starts and reverses inside
+            // ~100ms reads as a flicker, not as feedback. Waiting 200ms means
+            // fast updates show no transition at all, and only a genuinely
+            // slow one dims. Doing this in CSS rather than by delaying the
+            // `stale` state keeps pointer-events off for the whole window.
             <div
               className={
                 stale
-                  ? "pointer-events-none flex flex-col gap-4 opacity-40 transition-opacity duration-150"
-                  : "flex flex-col gap-4 transition-opacity duration-150"
+                  ? "pointer-events-none flex flex-col gap-4 opacity-40 transition-opacity delay-200 duration-150"
+                  : "flex flex-col gap-4 opacity-100 transition-opacity duration-150"
               }
               aria-busy={stale}
             >
