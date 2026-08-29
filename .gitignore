@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.next/
+*.log
+.env
+.env.local
+
+# editor/tool-generated caches, not source
+.codeswim/
+.DS_Store
