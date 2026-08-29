@@ -2,13 +2,14 @@
 
 ## What's Being Asked
 
-Three deliverables for a 1-hour live presentation:
+The submission email asks for one public GitHub repository containing:
 
-1. **Executive summary** — proposed solution, alternatives considered, tradeoffs, key assumptions. Audience includes both technical and non-technical stakeholders.
-2. **Working prototype** — built in an AI-powered IDE, simulates transaction traffic, demonstrates the near real-time dashboard with filtering/drill-down.
-3. **Approach narrative** — how you tackled it, what AI tools you used, key decisions made. A story, not a log.
+1. **Working application** — a personal-finance/fintech prototype that can be run and demonstrated.
+2. **Kiro specs** — requirements, technical design, and task breakdown.
+3. **AI usage documentation** — a clear narrative of how AI contributed, not a prompt log.
+4. **README** — the selected approach, setup/demo guidance, tradeoffs, and next steps.
 
-Target effort: ~5–6 hours over 2–3 days. Prototype is a thin vertical slice, not production-ready.
+Target effort in the submission email: approximately three hours, with delivery within 72 hours. The attached architecture brief provides the deeper business and technical context below; the implementation remains a thin vertical slice, not a production-ready system.
 
 ---
 

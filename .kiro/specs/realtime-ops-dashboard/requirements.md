@@ -8,7 +8,7 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 **Production scope:** The target capability is a rolling 24-hour view, refreshing a few seconds behind live, with filtering and drill-down. All real-time transaction data is served from Nymbus-controlled infrastructure only — no external SaaS.
 
-**Prototype scope:** This document describes the working prototype, which compresses the 24-hour window to 5–30 minute windows to make the pipeline visibly live during a short demonstration. Several production-hardening behaviors (retry caps, Redis reconnect limits, strict enum validation) are noted as goals but are not implemented in the prototype. The prototype is not intended to be production-ready or feature-complete; it demonstrates and validates the architecture.
+**Prototype scope:** This document describes the working prototype, which compresses the 24-hour window to 5–30 minute windows to make the pipeline visibly live during a short demonstration. Authentication uses signed demo JWTs and query filters are validated server-side; the prototype is still intentionally not production-ready or feature-complete.
 
 **Out of scope:** Historical data beyond 24 hours flows to the existing OpenTelemetry/Grafana pipeline. The dashboard is read-only — no action or approval flows are in scope.
 
@@ -27,10 +27,10 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 - **tx_events**: The Postgres table that is the single source of truth for all transaction metrics.
 - **REDIS_UPDATE_CHANNEL**: The Redis pub/sub channel (`tx:updates`) used to broadcast "new data written" signals across API instances.
 - **SSE**: Server-Sent Events — the HTTP streaming mechanism used to push query results from the API to browser clients.
-- **FilterBar**: Dashboard component that exposes all filter dimensions to the user and controls the active `QueryFilters` state.
+- **FilterSidebar**: Dashboard component that exposes all user-selectable filter dimensions and controls the active `QueryFilters` state.
 - **TrendChart**: Dashboard component that displays transaction volume over time as a time-bucketed line chart.
 - **OutcomeBreakdown**: Dashboard component that displays a distribution of transaction outcome codes.
-- **LatencyPanel**: Dashboard component that displays p50 and p95 latency statistics.
+- **KpiRow**: Dashboard component that displays count, approval rate, p50, p95, and their prior-period deltas.
 - **DrilldownTable**: Dashboard component that displays paginated raw transaction rows with all fields.
 - **QueryFilters**: The set of filter parameters (`role`, `tenantId`, `eftVendor`, `messageType`, `txFamily`, `outcomeCode`, `sourceSystem`, `windowMinutes`) that scope a query or SSE stream.
 - **WindowMinutes**: The rolling look-back window applied to all queries. Supported values: 5, 15, or 30 minutes.
@@ -108,10 +108,10 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 #### Acceptance Criteria
 
-1. WHEN a request arrives with `role=tenant`, THE API SHALL require a non-empty `tenantId` parameter and SHALL append a tenant equality filter on every query using the provided `tenantId` value, such that no query executes without that filter present.
-2. IF a request has `role=tenant` and the `tenantId` parameter is absent or empty, THEN THE API SHALL reject the request with a 400 error response indicating the missing tenant identifier, and SHALL not execute any query.
-3. WHEN a request arrives with `role=global` and no `tenantId` parameter is present, THE API SHALL execute the query without any tenant filter applied.
-4. WHEN a request arrives with `role=global` and an optional `tenantId` parameter is present and non-empty, THE API SHALL apply a tenant equality filter on every query using that `tenantId` value as a drill-down constraint.
+1. WHEN a request is authenticated with a `role=tenant` claim, THE API SHALL require a non-empty `tenantId` in the verified token and SHALL append that tenant equality filter to every query; request parameters SHALL NOT be able to widen or replace that scope.
+2. IF a token is absent, invalid, expired, or contains a tenant role without a tenant identifier, THEN THE API SHALL reject the request with HTTP 401 and SHALL NOT execute a query.
+3. WHEN a request is authenticated with `role=global` and no tenant drill-down is selected, THE API SHALL execute the query without a tenant filter.
+4. WHEN a request is authenticated with `role=global` and an optional `tenantId` parameter is present, THE API SHALL apply that value as a drill-down constraint.
 5. THE API SHALL enforce tenant scoping on both the `/api/query` snapshot route and the `/api/stream` SSE route using the same filter-building logic, such that a filter applied on one route is identically applied on the other route for equivalent request parameters.
 
 ---
@@ -136,12 +136,13 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 #### Acceptance Criteria
 
-1. THE API SHALL return a single `QueryResult` object containing: `trend` (array of `{bucket: ISO 8601 UTC timestamp, count: non-negative integer}` time-series points), `outcomes` (array of `{outcomeCode, count: non-negative integer}` outcome distribution points), `latency` (`{p50, p95}` in milliseconds rounded to two decimal places, nullable when no data), `rows` (up to 50 most-recent raw `DrilldownRow` records ordered by `event_ts DESC`), and `totalCount` (non-negative integer total matching row count for the active filters).
+1. THE API SHALL return one `QueryResult` containing: `trend` (`bucket`, `count`, and nullable `p95`), `outcomes`, `latency`, up to 50 recent `rows`, `totalCount`, equal-length `previous`-window aggregates, `generatedAt`, and—only for global callers—a 50-entry `tenants` health list.
 2. WHEN computing trend data, THE API SHALL bucket events using `BucketSeconds` derived from the active `WindowMinutes`: 5 seconds for windows ≤5 minutes, 15 seconds for windows ≤30 minutes, and 60 seconds for windows >30 minutes; buckets with no matching events within the active window SHALL still appear in the `trend` array with a count of 0.
 3. THE API SHALL compute latency statistics using `percentile_cont(0.5)` for p50 and `percentile_cont(0.95)` for p95 across all `latency_ms` values matching the active filters.
 4. THE API SHALL return `outcomes` ordered by count descending; WHERE two outcome codes have equal counts, they SHALL be ordered by `outcomeCode` ascending.
 5. WHEN no rows match the active filters, THE API SHALL return `latency` as `{p50: null, p95: null}`, `trend` as an empty array, `outcomes` as an empty array, `rows` as an empty array, and `totalCount` as 0.
 6. IF any component of the `QueryResult` (trend, outcomes, latency, rows) cannot be computed due to a server-side error, THEN THE API SHALL fail the entire response atomically and return an error response rather than a partially populated `QueryResult`.
+7. THE global tenant-health navigator SHALL represent platform-wide health for the selected time window and SHALL NOT be re-scoped or reloaded solely because a detail filter such as EFT vendor, message type, family, or outcome changes.
 
 ---
 
@@ -153,7 +154,7 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 1. THE API SHALL expose a `/api/stream` route that responds with `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `Connection: keep-alive` headers and keeps the HTTP connection open.
 2. WHEN a client connects to `/api/stream`, THE API SHALL validate the provided filters and immediately execute a query and emit the result as the first SSE `data:` frame within 2 seconds.
-3. IF the provided filters are invalid or missing required fields at connection time, THEN THE API SHALL emit an SSE `event: error` frame with a JSON payload indicating the validation failure and close the connection.
+3. IF the provided token or filters are invalid at connection time, THEN THE API SHALL return HTTP 401 or 400 respectively before opening the SSE response.
 4. WHEN THE API receives a `tx:updates` Redis notification, THE API SHALL re-execute the query and emit a new SSE `data:` frame to all active stream clients on that instance, subject to the minimum push interval defined in criterion 5.
 5. THE API SHALL enforce a minimum push interval of 500 milliseconds between successive SSE frames emitted to a single client; IF a `tx:updates` notification arrives within 500 milliseconds of the last emission, THE API SHALL defer the emission until the 500-millisecond interval has elapsed.
 6. THE API SHALL emit a keep-alive SSE comment (`: keep-alive`) every 15 seconds of client inactivity to prevent proxy and browser connection timeouts.
@@ -169,7 +170,7 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 #### Acceptance Criteria
 
 1. THE API SHALL expose a `/api/query` route that accepts filter parameters as URL query string parameters, executes the query for those filters, and returns the `QueryResult` as a JSON response.
-2. IF the provided filter parameters are invalid (e.g., `role=tenant` without `tenantId`), THEN THE API SHALL return HTTP 400 with a JSON response body containing an error message indicating the validation failure.
+2. IF a provided filter is invalid (e.g., `windowMinutes=garbage`), THEN THE API SHALL return HTTP 400 with a JSON response body containing an error message indicating the validation failure.
 3. IF the query cannot be executed due to a server-side error, THEN THE API SHALL return HTTP 500 with a JSON response body containing an error message indicating the failure.
 
 ---
@@ -186,23 +187,23 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 4. WHEN an SSE `data:` frame arrives, THE Dashboard SHALL parse the payload as a `QueryResult` and update all four panel components within 200 milliseconds without triggering a full page re-render.
 5. IF an SSE `data:` frame payload cannot be parsed as a valid `QueryResult`, THEN THE Dashboard SHALL retain the last successfully rendered panel state and display an error indicator without disrupting the live SSE connection.
 6. WHEN no `QueryResult` data has been received from the SSE stream since the connection was established, THE Dashboard SHALL display a loading state in place of the four panel components.
+7. WHEN the authenticated user or active filters change, THE Dashboard SHALL NOT render a snapshot received under the prior scope while the replacement stream is connecting.
+8. WHEN a detail filter changes for a global caller, THE Dashboard SHALL keep the platform tenant navigator mounted while the filter-scoped panels load.
 
 ---
 
-### Requirement 11: Filter Bar
+### Requirement 11: Filter Sidebar
 
-**User Story:** As an operations engineer, I want a persistent filter bar with controls for every filter dimension, so that I can quickly scope the dashboard view to the traffic I care about.
+**User Story:** As an operations engineer, I want persistent filters with controls for every user-selectable dimension, so that I can quickly scope the dashboard view to the traffic I care about.
 
 #### Acceptance Criteria
 
-1. THE FilterBar SHALL render controls for: audience toggle (Tenant view / Global ops view), tenant selector, EFT vendor selector, message type selector, transaction family selector, outcome code selector, and time window selector.
-2. WHEN the audience is set to "Tenant view", THE FilterBar SHALL require a `tenantId` selection and SHALL default to the first tenant in the ordered list (`tenant-01`) if none is set.
-3. WHEN the audience is set to "Global ops view", THE FilterBar SHALL offer an optional tenant drill-down selector with an "All tenants" default option.
-4. THE FilterBar SHALL render tenant options for all 50 tenants (`tenant-01` through `tenant-50`).
-5. THE FilterBar SHALL render time window options for exactly three durations: 5 minutes, 15 minutes, and 30 minutes, and SHALL default to the 15-minute window on initial load.
-6. THE FilterBar SHALL display the live connection status indicator as one of two discrete states: "connected" or "disconnected".
-7. WHEN any filter control value changes, THE FilterBar SHALL apply the updated filter to the dashboard view within 500 milliseconds without requiring a manual submit action.
-8. IF a required filter value is absent when the FilterBar initialises, THEN THE FilterBar SHALL apply the documented default value for that filter before rendering any dashboard data.
+1. THE FilterSidebar SHALL render controls for EFT vendor, message type, transaction family, outcome code, and time window; role SHALL come from the verified session rather than a client toggle.
+2. WHEN the caller has a tenant role, THE Dashboard SHALL lock the view to the token's tenant and SHALL NOT render cross-tenant navigation.
+3. WHEN the caller has a global role, THE Dashboard SHALL offer an "All tenants" view and direct drill-down across all 50 tenants.
+4. THE FilterSidebar SHALL render time window options for exactly 5, 15, and 30 minutes and SHALL default to 15 minutes.
+5. THE FilterSidebar SHALL display live/disconnected state and the age of the latest received snapshot.
+6. WHEN any filter changes, THE Dashboard SHALL apply it within 500 milliseconds without a manual submit action.
 
 ---
 
@@ -233,18 +234,17 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 ---
 
-### Requirement 14: Latency Panel
+### Requirement 14: KPI and Latency Panels
 
 **User Story:** As an operations engineer, I want to see p50 and p95 processing latency alongside a total transaction count, so that I can quickly gauge whether end-to-end performance is within acceptable bounds.
 
 #### Acceptance Criteria
 
-1. THE LatencyPanel SHALL display the `p50` and `p95` latency values (in milliseconds) from the `latency` field of the most-recently-received `QueryResult`.
-2. THE LatencyPanel SHALL display the `totalCount` from the most-recently-received `QueryResult`.
-3. WHEN `p50` or `p95` is `null` (no data), THE LatencyPanel SHALL display a "—" placeholder rather than a numeric value.
-4. WHEN a new `QueryResult` is received, THE LatencyPanel SHALL replace all currently displayed values (p50, p95, totalCount) with the values from the new result.
-5. WHEN no `QueryResult` has yet been received since the connection was established, THE LatencyPanel SHALL display a loading state in place of all three values.
-6. WHEN `totalCount` is null or absent in the received `QueryResult`, THE LatencyPanel SHALL display a "—" placeholder in place of the count value.
+1. THE KPI row SHALL display total count, approval rate, p50, and p95 for the active window.
+2. THE KPI row SHALL compare each value with the immediately preceding window of equal length and label the direction of change.
+3. THE latency trend chart SHALL plot bucket-level p95 from the most recent result.
+4. WHEN a latency or rate value is null, THE Dashboard SHALL display a "—" placeholder.
+5. WHEN no result has arrived for the active scope, THE Dashboard SHALL display a loading state rather than prior-scope KPI values.
 
 ---
 
@@ -271,7 +271,7 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 #### Acceptance Criteria
 
-1. THE Consumer SHALL periodically delete all rows from `tx_events` where `event_ts` is older than the configured retention window; for the prototype the retention window is set to match the demo observation period (30 minutes or less); in production this window SHALL be set to 24 hours, beyond which data is the responsibility of the OpenTelemetry/Grafana pipeline.
+1. THE Consumer SHALL periodically delete rows older than the configured retention window; the prototype SHALL retain at least 60 minutes so the 30-minute current and prior windows are both complete. Production SHALL retain 48 hours or maintain equivalent rollups if it presents 24-hour period comparisons.
 2. THE Consumer SHALL execute the retention cleanup on an interval no longer than 30 seconds.
 3. WHEN retention cleanup completes, THE Consumer SHALL log the number of rows removed, including zero if no rows qualified for deletion.
 4. IF the retention cleanup operation fails, THEN THE Consumer SHALL log an error message indicating the failure and retry on the next scheduled interval without skipping subsequent cleanup cycles.

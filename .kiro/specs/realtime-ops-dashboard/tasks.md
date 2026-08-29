@@ -29,7 +29,7 @@ This is a retroactive task record: the prototype was built before this spec work
     - _Requirements: 16 (partial — see design.md: no zero-row logging or failure retry handling)_
 
 - [x] 5. Build the Fastify API
-  - [x] 5.1 Shared filter-builder (`filters.ts`, `db.ts`) enforcing server-side tenant scoping identically on both routes.
+  - [x] 5.1 Signed demo authentication plus a shared filter-builder (`auth.ts`, `filters.ts`, `db.ts`) enforcing claim-derived tenant scoping identically on both routes.
     - _Requirements: 5, 6_
   - [x] 5.2 `/api/query` snapshot route returning the full `QueryResult` shape.
     - _Requirements: 7, 9_
@@ -39,15 +39,15 @@ This is a retroactive task record: the prototype was built before this spec work
     - _Requirements: 4.3, 4.4, 17_
 
 - [x] 6. Build the Next.js dashboard
-  - [x] 6.1 `useSse` hook: opens/reopens `EventSource` on filter change, exposes connection state.
+  - [x] 6.1 Login/session flow and `useSse` hook: opens/reopens on filter change, exposes connection freshness, and never renders a snapshot from a prior token/filter scope.
     - _Requirements: 10_
-  - [x] 6.2 `FilterBar`: audience toggle, all filter selectors, tenant list, window selector, connection indicator.
+  - [x] 6.2 `FilterSidebar` and `TenantHealthSidebar`: claim-derived audience, filters, all-tenant navigation, window selector, and connection indicator.
     - _Requirements: 11_
   - [x] 6.3 `TrendChart`: live time-bucketed volume chart.
     - _Requirements: 12_
   - [x] 6.4 `OutcomeBreakdown`: outcome distribution with click-to-filter / click-to-toggle-off.
     - _Requirements: 13_
-  - [x] 6.5 `LatencyPanel`: p50/p95/total count with null placeholders.
+  - [x] 6.5 `KpiRow` and `LatencyTrendChart`: p50/p95/count/approval metrics, prior-period deltas, and bucket-level p95 trend.
     - _Requirements: 14_
   - [x] 6.6 `DrilldownTable`: recent matching rows, formatted amount/latency/outcome cells.
     - _Requirements: 15_
@@ -70,7 +70,11 @@ This is a retroactive task record: the prototype was built before this spec work
   - `overview.md`: generated architecture map with a source-linked diagram.
   - _Requirements: 19 (documented, not a code task — satisfied by the architecture itself never routing through external infrastructure)_
 
+- [x] 9. Prepare submission artifacts
+  - Reconcile the Kiro requirements/design/tasks with the authenticated dashboard and comparative metrics.
+  - Add `AI_USAGE.md`, an explicit README submission map, migration guidance, verification commands, and production next steps.
+
 ## Not started
 
-- [ ] 9. Close the gaps listed in `design.md`'s Known Deviations table (batch-size cap, zero-fill trend buckets, outcome tie-break ordering, distinct 500-vs-400 error handling, retention failure handling, empty-state UI messages) before treating this as production-track code rather than a prototype.
-- [ ] 10. Validate at production-representative scale: sustained 100–150 TPS write throughput and query latency across a full 24-hour window.
+- [ ] 10. Close the remaining prototype deviations in `design.md` (batch cap, zero-filled trend buckets, explicit malformed-frame/empty UI states, Redis publish retries, and a queryable dropped-event metric) before production-track use.
+- [ ] 11. Validate at production-representative scale: sustained 100–150 TPS, a full 24-hour window, and 48-hour source/rollup coverage for prior-period comparison.

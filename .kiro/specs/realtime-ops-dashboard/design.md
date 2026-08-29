@@ -33,19 +33,20 @@ Two properties drive every choice below:
 ### Consumer (`services/consumer`)
 - `index.ts` subscribes to `tx-events` via kafkajs's `eachBatch`, buffers parsed events per batch, calls `insertBatch` (a single multi-row `INSERT`), then resolves offsets and commits only after the insert succeeds. Satisfies Requirement 3.
 - After a successful insert, publishes to `tx:updates` via `ioredis`. Satisfies Requirement 4.1.
-- A separate `setInterval` runs the retention `DELETE` every 30s (Requirement 16.2) using `RETENTION_MINUTES`.
+- A separate `setInterval` runs the retention `DELETE` every 30s (Requirement 16.2). `RETENTION_MINUTES` defaults to 60 and rejects smaller values so the longest current/prior comparison has complete source data.
 
 ### API (`services/api`)
-- `filters.ts` — `filtersFromQuery` is the single parser both routes call, satisfying Requirement 5.5's "same filter-building logic" for both routes.
-- `db.ts` — `buildWhere` enforces tenant scoping (`role=tenant` forces `tenant_id` into every query regardless of other input) and `runQuery` issues the five parallel queries (trend, outcomes, latency, rows, count) that make up `QueryResult`. Satisfies Requirements 5–7.
+- `auth.ts` and `routes/login.ts` issue/verify signed demo JWTs. Query role and tenant scope come only from verified claims; a global caller may narrow its own view but a tenant caller cannot widen it.
+- `filters.ts` is the single parser both query routes call. Invalid enums and numeric values survive parsing long enough for `validateFilters` to reject them instead of silently falling back.
+- `db.ts` enforces tenant scoping and executes four detail statements per refresh: trend, outcomes, recent rows, and combined current/prior aggregates. Global tenant health is a separate window-keyed aggregate cached for 2 seconds, so changing vendor/type/outcome does not issue that fifth statement or redefine the platform navigator. The health response is materialized against the known 50-tenant directory so quiet tenants remain visible with zero/null metrics.
 - `routes/query.ts` — `/api/query`, satisfies Requirement 9.
 - `routes/stream.ts` — `/api/stream`, sends an initial snapshot then subscribes to `onUpdate` (from `redisSub.ts`), throttled to one push per 500ms per connection. Satisfies Requirement 8.
 - `redisSub.ts` — one `ioredis` subscriber per process, fanning out to all local SSE connections via an in-process listener `Set`. Satisfies Requirement 4.3 and Requirement 17.
 
 ### Dashboard (`apps/dashboard`)
-- `lib/useSse.ts` — opens an `EventSource` against `/api/stream` with the current filters serialized as query params; reopens on filter change. Satisfies Requirement 10.
-- `components/FilterBar.tsx` — audience toggle, all filter selectors, connection indicator. Satisfies Requirement 11.
-- `components/TrendChart.tsx`, `OutcomeBreakdown.tsx`, `LatencyPanel.tsx`, `DrilldownTable.tsx` — satisfy Requirements 12–15 respectively. `OutcomeBreakdown`'s bar-click handler toggles `outcomeCode` in the shared filter state, satisfying 13.2/13.3.
+- `lib/auth.ts` manages the demo session; the UI decodes claims only for presentation while the API performs all security decisions.
+- `lib/useSse.ts` reopens `EventSource` on scope changes and keys panel snapshots to both token and filters, preventing a prior tenant/global payload from rendering while the replacement stream connects. Tenant navigation is retained separately for the same token, so detail-filter changes do not unmount it.
+- `FilterSidebar`, `TenantHealthSidebar`, `KpiRow`, `TrendChart`, `LatencyTrendChart`, `OutcomeBreakdown`, and `DrilldownTable` provide filters, tenant navigation, prior-period context, and raw drill-down. Clicking an outcome toggles the shared outcome filter.
 
 ## Data Models
 
@@ -85,7 +86,7 @@ Every parsed message is validated against the `TxEvent` contract before it's all
 
 **Validates: Requirements 5**
 
-`role=tenant` forces `tenant_id` into every query's `WHERE` clause in one shared filter-builder used by both the snapshot and streaming routes — there is no code path where a tenant-scoped request executes without that filter.
+Both routes verify the signed token before building filters. A tenant claim forces its `tenant_id` into every SQL scope and ignores any requested tenant; role is never accepted from the query string. There is no authenticated tenant code path that executes without its equality predicate.
 
 ### Property 5: No single dependency outage takes down a whole API or consumer instance
 
@@ -97,7 +98,7 @@ Every parsed message is validated against the `TxEvent` contract before it's all
 
 **Validates: Requirements 4, 17**
 
-A 400ms result cache keyed by filter signature collapses concurrent identical requests into one Postgres query, regardless of how many SSE clients share those filters.
+A 400ms result cache keyed by filter signature collapses concurrent identical requests, while a separate 2-second tenant-health cache is keyed only by window. DB work therefore follows the data dependency: four detail statements change with vendor/type/outcome, but the platform navigator does not.
 
 ## Error Handling
 
@@ -110,7 +111,8 @@ A 400ms result cache keyed by filter signature collapses concurrent identical re
 | Redis publish fails | Logged; does not affect the already-committed Postgres write | 4.2 (partial — see Known Deviations) |
 | API re-query fails during an SSE push | `event: error` frame sent to that client; connection stays open | 8.8, 17.5 |
 | SSE client disconnects | Redis listener unsubscribed synchronously in the `close` handler | 8.7 |
-| Tenant role with missing/empty `tenantId` | `/api/query` returns 400; `/api/stream` emits `event: error` | 5.2, 9.2 |
+| Missing/invalid/expired token or unsafe tenant claim | Request is rejected with 401 before any query executes | 5.2 |
+| Malformed filter value | Request is rejected with 400 before query/SSE response begins | 6, 9.2 |
 
 ## Known Deviations from Requirements (Prototype Scope)
 
@@ -121,11 +123,9 @@ The exercise this prototype was built for explicitly does not require production
 | 4.2 | Retry Redis publish 3 times before giving up | Single publish attempt, now wrapped so failure is logged and discarded without affecting the already-committed insert | An external audit flagged the un-wrapped version as a crash risk (see Audit Remediation below); the specific "3 attempts" figure remains unimplemented, but the actual requirement intent — a failed publish must never take down the write path — is now met |
 | 3.2 | Cap batches at 1000 messages | No explicit cap set; batch size follows kafkajs's own fetch-size defaults | At demo/prototype throughput, batches never approach 1000; worth adding a real `maxBytes`/count guard before production |
 | 7.2 | Empty trend buckets appear with `count: 0` | Only buckets with ≥1 matching row are returned | Minor chart-continuity gap (a flat line reads as "no data" instead of an explicit zero); straightforward to add with a `generate_series` join |
-| 7.4 | Tie-break equal outcome counts by code, ascending | Ordered by count only | Cosmetic; only visible when two outcome codes have exactly equal counts |
 | 8.3 | Close the SSE connection on invalid filters | Filters are now validated *before* the stream opens (400 JSON response, no SSE headers sent) rather than after | Resolved during audit remediation — this was originally a deviation, now matches the requirement more closely than the original "emit error, stay open" behavior did |
 | 10.5 | Show an explicit error indicator on an unparseable SSE frame | Malformed frame is silently ignored | Low risk — the API only ever emits frames it generated itself; this matters more if the API's payload shape changes independently of the dashboard |
 | 12.3, 13.4, 15.3 | Explicit "no data" empty states | Panels render an empty chart/table instead of a message | Cosmetic polish item, not a correctness gap |
-| 16.3, 16.4 | Log zero-row retention cleanups; retry on cleanup failure | Fixed during audit remediation: now logs `0` explicitly and the cleanup query is wrapped in try/catch | Resolved |
 | 18.5 | Missing/invalid incident env vars cause the Generator to log an error and exit | Falls back to documented defaults instead | Friendlier for demo use (a typo'd env var shouldn't kill the whole traffic generator); the stricter behavior matters more once this drives anything beyond a live demo |
 | 1.6 | Dropped-event counter exposed via "existing metrics interface" | Logged to stdout every 5s; no queryable metrics endpoint | There is no real metrics interface in the prototype to attach to — this is the one criterion that's aspirational until the Generator has an actual `/metrics` surface |
 
@@ -139,22 +139,23 @@ An external code-review pass (run against the working prototype, not against thi
 
 1. **Duplicate rows on Kafka replay** — offsets commit after the Postgres write, so a crash between "insert succeeded" and "offset committed" replays the batch; with no uniqueness constraint, replay duplicated rows (199 duplicate groups found live). Fixed with `UNIQUE (kafka_partition, kafka_offset)` on `tx_events` and `ON CONFLICT DO NOTHING` on the insert. Re-verified by forcing 5 consumer crashes mid-write: zero duplicates.
 2. **Unbounded in-flight Generator sends** — a new Kafka produce started every tick with no concurrency cap, risking unbounded memory growth under broker degradation. Fixed with a `MAX_IN_FLIGHT` guard that drops immediately once hit.
-3. **SSE query amplification** — every Redis notification triggered an independent 5-query Postgres round-trip per connected client, and a bug let those overlap per connection (the "in-flight" flag cleared before the query actually finished). Fixed by not clearing that flag until the query resolves, and by caching query results for 400ms per unique filter signature so clients sharing filters share one query.
+3. **SSE query amplification** — every Redis notification triggered an independent Postgres round-trip per connected client, and a bug let those overlap per connection (the "in-flight" flag cleared before the query actually finished). Fixed by holding the flag through completion, caching by filter signature, consolidating current count/latency/prior aggregates, and caching platform tenant health independently; a detail refresh now uses four statements and tenant health adds a fifth only when its own cache expires.
 4. **Poison-message halt** — a structurally invalid but JSON-parseable message (e.g. `{}`) would fail the insert, throw before any offset resolved, and repeat forever. Fixed with `validate.ts`, which checks every field against the `TxEvent` contract before a record is allowed into the insert batch; invalid messages are logged (with topic/partition/offset) and skipped instead.
 5. **`/health` couldn't detect an outage; every error was a 400** — fixed with a real `/ready` check (pings Postgres and Redis, 503 if either fails) and a `ValidationError` type so genuine server errors return 500.
 6. **Unhandled `error` events could crash the whole process** — found while re-testing #5: `pg.Pool` and the `ioredis` clients are `EventEmitter`s that throw and crash the process on an unhandled `'error'` event. Neither the API's nor the consumer's Postgres pool, nor either service's Redis client, had a listener. Discovered by actually stopping Postgres under a live API instance (it died) rather than by code inspection. All four now have listeners; re-verified by restarting Postgres under both live processes with no crash.
+7. **Scope and comparison correctness** — filter changes could render the previous scope until the new stream delivered; malformed windows silently became the 15-minute default; 30-minute comparisons retained only 30 minutes; quiet tenants disappeared from the health navigator. Snapshots are now keyed to token+filters, malformed windows return 400, retention is at least 60 minutes, and the global health list always contains the known 50 tenants.
 
 None of this was found by reading the code more carefully — it came from adversarial testing against the running system (crash loops, killing dependencies mid-request, feeding it malformed input), which is the same verification philosophy the Testing Strategy section describes.
 
 ## Testing Strategy
 
-This prototype was verified by driving the running system rather than by an automated test suite (consistent with the exercise's "thin vertical slice" framing). What was actually exercised:
+Verification combines focused automated tests with adversarial checks against the running system. The API suite covers authentication, token-derived tenant scope, filter parsing/validation, and SQL parameterization. Live checks exercise the distributed behaviors that unit tests cannot establish on their own:
 
 - **Fire-and-forget capture (Req 1):** confirmed via the Generator's `sent`/`dropped` log line under normal operation (0 dropped at steady TPS).
 - **Batched ingestion and crash recovery (Req 3):** killed the Consumer process mid-stream, confirmed the Postgres row count stalled, restarted it, confirmed `kafka-consumer-groups.sh --describe` showed lag return to 0 with no gap or duplicate rows.
-- **Tenant-scoped enforcement (Req 5):** `curl` against `/api/query?role=tenant` with no `tenantId` returned 400; scoped to a specific tenant returned only that tenant's rows.
+- **Tenant-scoped enforcement (Req 5):** signed in as both global and tenant demo users; direct attempts to supply a different role/tenant were ignored or constrained by the verified token, and missing/invalid tokens returned 401.
 - **Multi-instance fan-out (Req 4, 17):** ran two API instances on different ports against the same Postgres/Redis; confirmed both independently pushed live, identical-shape updates to two separate SSE connections from one Consumer publish.
 - **Incident mode and drill-down (Req 18, 13, 15):** enabled `INCIDENT_MODE`, watched the injected outcome spike appear in the browser's trend chart when filtered to the affected tenant, and confirmed the exact matching rows appeared in the drill-down table.
-- **Filter/drill-down UI (Req 11–15):** exercised the audience toggle, tenant/vendor/outcome selectors, and outcome-bar click-to-filter live in a browser via the FilterBar and OutcomeBreakdown components.
+- **Filter/drill-down UI (Req 11–15):** exercised global tenant navigation, a tenant-scoped session, vendor/outcome/window filters, KPI deltas, and outcome-bar click-to-filter in the live browser.
 
 Not yet verified at production-representative scale: sustained write throughput at the full 100–150 TPS peak, and query latency across a genuinely full 24-hour window rather than the compressed demo window.

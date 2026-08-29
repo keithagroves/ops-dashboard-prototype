@@ -3,8 +3,24 @@
 Thin vertical slice for the Architect take-home exercise. Simulates ISO 8583-style
 transaction traffic, captures metrics from it without touching the (simulated)
 authorization hot path, and drives a near-real-time, filterable, multi-tenant
-operations dashboard. See `Architect - Take-Home Exercise Final.pdf` for the spec
-and `notes.md` for the design journey/decisions.
+operations dashboard.
+
+## Submission map
+
+- **Working application:** generator, Kafka consumer, Fastify API, and Next.js dashboard in this repository.
+- **Kiro specs:** [requirements](.kiro/specs/realtime-ops-dashboard/requirements.md), [technical design](.kiro/specs/realtime-ops-dashboard/design.md), and [task breakdown](.kiro/specs/realtime-ops-dashboard/tasks.md).
+- **Approach and tradeoffs:** the architecture summary below and the longer [design journey](notes.md).
+- **AI usage:** [AI_USAGE.md](AI_USAGE.md).
+- **Next steps:** the production path at the end of this README.
+
+## Approach
+
+The implementation proves one deliberate vertical slice: emit best-effort telemetry
+off the authorization path, make ingestion durable and replay-safe, then serve a
+tenant-safe operational view a few seconds behind live. It uses the technologies
+already present in the target environment—Kafka, Postgres, Redis, TypeScript, and
+React—rather than introducing a specialist time-series store before the stated
+100–150 TPS workload demonstrates a need for one.
 
 ## Architecture
 
@@ -47,8 +63,11 @@ generator (connector simulator)
   actually checks Postgres and Redis and returns 503 if either is down —
   these are deliberately different checks for different purposes.
 - **Multi-tenancy**: every row carries `tenant_id`; the API enforces
-  tenant-scoping server-side. The prototype takes `role`/`tenantId` as request
-  params standing in for a verified JWT claim in production.
+  tenant-scoping server-side. Sign-in issues a signed JWT and **every query's
+  `role` — and a tenant caller's `tenantId` — is read from that token, never
+  from the query string**, so a tenant session cannot widen its own scope by
+  asking. A global operator may additionally narrow to one tenant, which is
+  the only case where the request influences `tenantId` at all.
 
 ## Running it
 
@@ -64,7 +83,45 @@ npm run dev:api         # terminal 3 — Fastify API on :4000
 npm run dev:dashboard   # terminal 4 — Next.js on :3000 (or next free port)
 ```
 
-Then open the dashboard URL Next.js prints.
+Then open the dashboard URL Next.js prints and sign in.
+
+For an existing database created before Kafka coordinates were added, run
+`npm run db:migrate` once after `npm run infra:up`. A fresh database receives
+the current schema from `db/init.sql` and does not need the upgrade migration.
+The upgrade intentionally clears the rolling metrics table because legacy rows
+have no real Kafka coordinates to backfill; it does not affect source transaction
+records because this prototype table is operational telemetry, not a ledger.
+
+### Signing in
+
+| Username | Password | You get |
+| --- | --- | --- |
+| `admin` | `demo` | Platform operator — cross-tenant view, tenant navigator sidebar |
+| `tenant-01` … `tenant-50` | `demo` | That institution's own view, scoped server-side |
+
+### Tests
+
+```bash
+npm test          # both workspaces, no infra required
+```
+
+Node's built-in test runner (`node --test`) via `tsx` — no test framework
+dependency. Coverage is deliberately narrow: the pure logic where a mistake is
+either a security hole or a silently wrong number, not the React rendering.
+
+- `services/api/src/auth.test.ts` — token issuance and verification: forged
+  signatures, `alg=none`, expiry, a tenant token with no tenantId, and that
+  wrong-password and unknown-user return the *same* error.
+- `services/api/src/filters.test.ts` — scope comes from the token, so
+  `?role=global` from a tenant session is ignored.
+- `services/api/src/db.test.ts` — `validateFilters` enum/window rejection, and
+  that `buildWhere` parameterizes every attacker-influenced value while always
+  applying the claim-derived tenant predicate.
+- `apps/dashboard/app/lib/*.test.ts` — approval-rate maths (empty window is
+  `null`, not `0`) and the tenant-health thresholds.
+
+The two tenant-scoping tests were verified by deliberately reintroducing each
+bug and confirming the suite goes red, rather than trusting a green run.
 
 ### Demo knobs (env vars on the generator)
 
@@ -76,6 +133,10 @@ Then open the dashboard URL Next.js prints.
   "approval rate dips, filter into it, see why" drill-down story has something
   real to find. Verified live: filtering to the affected tenant + outcome code
   shows a clear spike in the trend chart and the exact matching rows.
+
+The consumer also accepts `RETENTION_MINUTES` (default `60`, minimum `60`).
+Sixty minutes is required because the longest 30-minute view compares its KPIs
+with the immediately preceding 30-minute period.
 
 ### Two-instance fan-out demo
 
@@ -113,7 +174,7 @@ consumer crashes mid-write and diffing row counts before/after: zero duplicate
 
 ## Robustness fixes from an external audit
 
-An external code-review pass on this prototype found five real issues, all
+An external code-review pass on this prototype found six real issues, all
 verified and fixed rather than argued with:
 
 1. **Kafka replay could duplicate rows.** Insert-then-publish-then-commit
@@ -156,8 +217,16 @@ verified and fixed rather than argued with:
 
 - No real ISO 8583 parsing — synthetic event generation stands in, per the
   exercise's own instructions.
-- No authentication — tenant scoping is enforced against a request parameter
-  instead of a verified JWT claim.
+- Authentication is real enough to make scoping meaningful (signed JWT, claims
+  verified on every request) but is not a real identity system: a hardcoded
+  demo user directory, one shared password, no hashing, no refresh/revocation.
+  Production verifies tokens from the platform's existing IdP instead of
+  issuing its own.
+- The SSE stream passes its token as a **query parameter**, because
+  `EventSource` cannot set an `Authorization` header. Regular API calls use a
+  Bearer header. Production would use an httpOnly cookie (or a fetch-based
+  stream) so the credential never lands in a URL where it can leak into logs
+  and referrers.
 - Demo window is compressed to minutes, not a literal rolling 24h — same
   bucketing/query mechanics apply at either scale (see the caption on the
   dashboard itself).
@@ -169,3 +238,36 @@ verified and fixed rather than argued with:
   independently deployed/scaled EKS containers.
 - Filter changes reopen the SSE connection rather than tracking per-connection
   filter state server-side — simpler, same user-visible behavior.
+
+## Verification
+
+The workspace is checked with:
+
+```bash
+npx tsc --noEmit -p services/generator/tsconfig.json
+npx tsc --noEmit -p services/consumer/tsconfig.json
+npx tsc --noEmit -p services/api/tsconfig.json
+npm test
+npm run lint -w apps/dashboard
+npm run build -w apps/dashboard -- --webpack
+npm audit --audit-level=high
+```
+
+The running-system checks in the Kiro design cover authentication and tenant
+isolation, malformed filters, Kafka replay idempotency, SSE pacing and fan-out,
+dependency outages, incident drill-down, and the query cache under concurrency.
+
+## Next steps
+
+1. Run a 24-hour, 150 TPS soak test and capture query latency, Kafka lag, database
+   growth, and reconnect behavior as explicit service-level objectives.
+2. Replace demo authentication with the platform IdP and move SSE credentials to
+   secure httpOnly cookies (or a fetch-based stream) so tokens never appear in URLs.
+3. Partition `tx_events` by time and add hourly/minute rollups if the soak test shows
+   raw-event aggregation cannot meet the dashboard latency target. A production
+   24-hour comparison needs 48 hours of raw retention or equivalent rollups.
+4. Extend the existing authentication/filter tests with API contract, browser
+   reconnect, consumer replay, and dependency failure-injection coverage; wire
+   dropped-event and consumer-lag counters into the existing metrics surface.
+5. Add deployment manifests, secret management, rate limiting, CSP/HTTPS policy,
+   and an operational runbook before treating the prototype as production-track.
