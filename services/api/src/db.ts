@@ -31,6 +31,41 @@ function bucketSecondsFor(windowMinutes: number): number {
   return 60;
 }
 
+export function buildTrendSql(clause: string, windowMinutes: number, bucketSeconds: number): string {
+  // Requirement 7 asks for explicit zeroes between samples, but also requires
+  // an entirely empty trend when no rows match. `matched_count` gates the
+  // generated timeline so those two behaviors coexist: one or more matching
+  // rows yields every bucket in the window; zero matching rows yields none.
+  return `
+    WITH matched AS (
+      SELECT to_timestamp(floor(extract(epoch from event_ts) / ${bucketSeconds}) * ${bucketSeconds}) AS bucket,
+             count(*) AS count,
+             percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
+      FROM tx_events
+      WHERE ${clause}
+      GROUP BY bucket
+    ),
+    matched_count AS (
+      SELECT count(*) AS count FROM matched
+    ),
+    buckets AS (
+      SELECT generate_series(
+        to_timestamp(floor(extract(epoch from now() - interval '${windowMinutes} minutes') / ${bucketSeconds}) * ${bucketSeconds}),
+        to_timestamp(floor(extract(epoch from now()) / ${bucketSeconds}) * ${bucketSeconds}),
+        interval '${bucketSeconds} seconds'
+      ) AS bucket
+      FROM matched_count
+      WHERE count > 0
+    )
+    SELECT buckets.bucket,
+           coalesce(matched.count, 0) AS count,
+           matched.p95
+    FROM buckets
+    LEFT JOIN matched USING (bucket)
+    ORDER BY buckets.bucket
+  `;
+}
+
 const VALID_WINDOW_MINUTES = [5, 15, 30];
 
 // Cheap enough to call before opening an SSE stream (or from the snapshot
@@ -264,15 +299,7 @@ async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
   const bucketSeconds = bucketSecondsFor(windowMinutes);
   const { clause, params } = buildWhere(filters);
 
-  const trendSql = `
-    SELECT to_timestamp(floor(extract(epoch from event_ts) / ${bucketSeconds}) * ${bucketSeconds}) AS bucket,
-           count(*) AS count,
-           percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
-    FROM tx_events
-    WHERE ${clause}
-    GROUP BY bucket
-    ORDER BY bucket
-  `;
+  const trendSql = buildTrendSql(clause, windowMinutes, bucketSeconds);
 
   const outcomesSql = `
     SELECT outcome_code, count(*) AS count

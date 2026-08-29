@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { QueryFilters } from "@nymbus/shared";
-import { buildWhere, validateFilters } from "./db";
+import { buildTrendSql, buildWhere, validateFilters } from "./db";
 import { ValidationError } from "./errors";
 
 const global = (extra: Partial<QueryFilters> = {}): QueryFilters => ({ role: "global", ...extra });
@@ -9,6 +9,26 @@ const tenant = (extra: Partial<QueryFilters> = {}): QueryFilters => ({
   role: "tenant",
   tenantId: "tenant-07",
   ...extra,
+});
+
+describe("buildTrendSql", () => {
+  it("generates every bucket and zero-fills gaps", () => {
+    const sql = buildTrendSql("event_ts > now() - interval '5 minutes'", 5, 5);
+
+    assert.match(sql, /generate_series/);
+    assert.match(sql, /interval '5 seconds'/);
+    assert.match(sql, /coalesce\(matched\.count, 0\)/);
+    assert.match(sql, /LEFT JOIN matched USING \(bucket\)/);
+  });
+
+  it("gates generated buckets on at least one matching row", () => {
+    const sql = buildTrendSql("event_ts > now() - interval '30 minutes'", 30, 15);
+
+    assert.match(sql, /matched_count/);
+    assert.match(sql, /WHERE count > 0/);
+    assert.match(sql, /interval '30 minutes'/);
+    assert.match(sql, /interval '15 seconds'/);
+  });
 });
 
 describe("validateFilters", () => {
