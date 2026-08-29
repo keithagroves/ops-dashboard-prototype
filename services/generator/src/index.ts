@@ -31,7 +31,10 @@ function weightedPick<T extends string>(weights: [T, number][]): T {
 
 function pickTenant(): string {
   const useHot = Math.random() < config.hotTenantRatio;
-  const pool = useHot ? [...hotTenants] : tenants.filter((t) => !hotTenants.has(t));
+  const preferredPool = useHot ? [...hotTenants] : tenants.filter((t) => !hotTenants.has(t));
+  // A tiny demo configuration (or HOT_TENANT_FRACTION=1) can leave the cold
+  // pool empty. Fall back to all tenants rather than emitting `undefined`.
+  const pool = preferredPool.length > 0 ? preferredPool : tenants;
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
