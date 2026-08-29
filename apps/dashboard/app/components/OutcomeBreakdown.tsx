@@ -19,9 +19,13 @@ export function OutcomeBreakdown({
   onSelect,
 }: {
   outcomes: OutcomeBreakdownPoint[];
-  selected?: string;
+  selected?: readonly string[];
   onSelect: (outcomeCode: string | undefined) => void;
 }) {
+  // Dim bars only when the selection is a strict subset. With no filter — or
+  // with a whole severity band selected from the sidebar — every bar the chart
+  // can still see is "in", so dimming would imply a narrowing that isn't there.
+  const isSelected = (code: string) => !selected || selected.length === 0 || selected.includes(code);
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-4">
       <div className="mb-2 flex items-baseline justify-between">
@@ -49,14 +53,16 @@ export function OutcomeBreakdown({
             <Bar
               dataKey="count"
               radius={[0, 4, 4, 0]}
-              onClick={(d) => onSelect(d.outcomeCode === selected ? undefined : d.outcomeCode)}
+              onClick={(d) =>
+                onSelect(selected?.length === 1 && selected[0] === d.outcomeCode ? undefined : d.outcomeCode)
+              }
               cursor="pointer"
             >
               {outcomes.map((o) => (
                 <Cell
                   key={o.outcomeCode}
                   fill={COLORS[o.outcomeCode] ?? "#737373"}
-                  opacity={!selected || selected === o.outcomeCode ? 1 : 0.35}
+                  opacity={isSelected(o.outcomeCode) ? 1 : 0.35}
                 />
               ))}
             </Bar>

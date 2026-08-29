@@ -19,11 +19,18 @@ export function buildUrl(path: string, filters: QueryFilters, token: string): st
   const API_BASE = getApiBase();
   const params = new URLSearchParams();
   params.set("token", token);
+  // Set-valued filters are appended once per value. An empty selection is
+  // omitted entirely rather than sent as a bare key: the API rejects an empty
+  // set, and "no constraint" is what an empty selection means here.
+  const appendAll = (key: string, values: readonly string[] | undefined) => {
+    for (const value of values ?? []) params.append(key, value);
+  };
+
   if (filters.tenantId) params.set("tenantId", filters.tenantId);
-  if (filters.eftVendor) params.set("eftVendor", filters.eftVendor);
-  if (filters.messageType) params.set("messageType", filters.messageType);
-  if (filters.txFamily) params.set("txFamily", filters.txFamily);
-  if (filters.outcomeCode) params.set("outcomeCode", filters.outcomeCode);
+  appendAll("eftVendor", filters.eftVendor);
+  appendAll("messageType", filters.messageType);
+  appendAll("txFamily", filters.txFamily);
+  appendAll("outcomeCode", filters.outcomeCode);
   if (filters.sourceSystem) params.set("sourceSystem", filters.sourceSystem);
   if (filters.windowMinutes) params.set("windowMinutes", String(filters.windowMinutes));
   return `${API_BASE}${path}?${params.toString()}`;

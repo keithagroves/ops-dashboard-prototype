@@ -31,14 +31,34 @@ describe("validateFilters", () => {
     // Regression: these reached the SQL layer unchecked, where an unknown
     // vendor silently matched zero rows and returned 200 instead of a 400.
     const cases: Partial<QueryFilters>[] = [
-      { eftVendor: "vendor-zzz" as QueryFilters["eftVendor"] },
-      { messageType: "not_a_type" as QueryFilters["messageType"] },
-      { txFamily: "not_a_family" as QueryFilters["txFamily"] },
-      { outcomeCode: "not_an_outcome" as QueryFilters["outcomeCode"] },
+      { eftVendor: ["vendor-zzz"] as unknown as QueryFilters["eftVendor"] },
+      { messageType: ["not_a_type"] as unknown as QueryFilters["messageType"] },
+      { txFamily: ["not_a_family"] as unknown as QueryFilters["txFamily"] },
+      { outcomeCode: ["not_an_outcome"] as unknown as QueryFilters["outcomeCode"] },
     ];
     for (const c of cases) {
       assert.throws(() => validateFilters(global(c)), ValidationError, JSON.stringify(c));
     }
+  });
+
+  it("rejects an empty set rather than reading it as no constraint", () => {
+    // `?eftVendor=` is far more likely a client bug than a request to match
+    // everything, and silently widening the result set is the worse failure.
+    const keys = ["eftVendor", "messageType", "txFamily", "outcomeCode"] as const;
+    for (const key of keys) {
+      assert.throws(() => validateFilters(global({ [key]: [] })), ValidationError, key);
+    }
+  });
+
+  it("accepts a multi-value set of valid members", () => {
+    assert.doesNotThrow(() => validateFilters(global({ eftVendor: ["vendor-a", "vendor-c"] })));
+  });
+
+  it("rejects a set where any member is invalid", () => {
+    assert.throws(
+      () => validateFilters(global({ eftVendor: ["vendor-a", "vendor-zzz"] as unknown as QueryFilters["eftVendor"] })),
+      ValidationError,
+    );
   });
 });
 
@@ -67,18 +87,25 @@ describe("buildWhere — filters and parameterization", () => {
     const { clause, params } = buildWhere(
       global({
         tenantId: "tenant-01",
-        eftVendor: "vendor-a",
-        messageType: "auth_request",
-        txFamily: "purchase",
-        outcomeCode: "approved",
+        eftVendor: ["vendor-a"],
+        messageType: ["auth_request"],
+        txFamily: ["purchase"],
+        outcomeCode: ["approved"],
         sourceSystem: "pos",
       }),
     );
-    assert.deepEqual(params, ["tenant-01", "vendor-a", "auth_request", "purchase", "approved", "pos"]);
+    assert.deepEqual(params, [
+      "tenant-01",
+      ["vendor-a"],
+      ["auth_request"],
+      ["purchase"],
+      ["approved"],
+      "pos",
+    ]);
     for (let i = 1; i <= params.length; i++) {
       assert.ok(clause.includes(`$${i}`), `missing placeholder $${i}`);
     }
-    for (const value of params) {
+    for (const value of params.flat()) {
       assert.ok(!clause.includes(String(value)), `value ${value} was inlined into SQL`);
     }
   });
@@ -86,10 +113,31 @@ describe("buildWhere — filters and parameterization", () => {
   it("keeps placeholder numbering contiguous when earlier filters are absent", () => {
     // The bug this guards: dropping a predicate but not renumbering leaves a
     // $2 with only one bound parameter.
-    const { clause, params } = buildWhere(global({ outcomeCode: "approved" }));
-    assert.deepEqual(params, ["approved"]);
-    assert.match(clause, /outcome_code = \$1/);
+    const { clause, params } = buildWhere(global({ outcomeCode: ["approved"] }));
+    assert.deepEqual(params, [["approved"]]);
+    assert.match(clause, /outcome_code = ANY\(\$1::text\[\]\)/);
     assert.ok(!clause.includes("$2"));
+  });
+
+  it("binds a multi-value filter as one array parameter, not N placeholders", () => {
+    // Using `= ANY($n)` instead of expanding `IN ($1,$2,...)` keeps the
+    // numbering independent of how many values each filter carries — the
+    // thing that makes hand-built IN lists error-prone.
+    const { clause, params } = buildWhere(
+      global({ eftVendor: ["vendor-a", "vendor-c"], messageType: ["auth_request"] }),
+    );
+    assert.deepEqual(params, [["vendor-a", "vendor-c"], ["auth_request"]]);
+    assert.match(clause, /eft_vendor = ANY\(\$1::text\[\]\)/);
+    assert.match(clause, /message_type = ANY\(\$2::text\[\]\)/);
+    assert.ok(!clause.includes("$3"));
+  });
+
+  it("copies the values rather than binding the caller's array", () => {
+    // Mutating a filter object after building must not alter the bound query.
+    const vendors: QueryFilters["eftVendor"] = ["vendor-a"];
+    const { params } = buildWhere(global({ eftVendor: vendors }));
+    vendors!.push("vendor-b");
+    assert.deepEqual(params, [["vendor-a"]]);
   });
 
   it("defaults to a 15-minute window", () => {

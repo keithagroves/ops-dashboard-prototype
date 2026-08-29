@@ -61,15 +61,44 @@ export interface LoginResponse {
   claims: AuthClaims;
 }
 
+/**
+ * The enum filters are sets, not single values. An operator triaging an
+ * incident needs "vendor-a and vendor-c" or "every decline", and needs to
+ * exclude network-management heartbeats from volume counts - none of which a
+ * single value can express. An absent key means "no constraint"; an empty
+ * array is rejected rather than silently matching everything.
+ */
 export interface QueryFilters {
   role: Role;
   tenantId?: string;
-  eftVendor?: EftVendor;
-  messageType?: MessageType;
-  txFamily?: TxFamily;
-  outcomeCode?: OutcomeCode;
+  eftVendor?: EftVendor[];
+  messageType?: MessageType[];
+  txFamily?: TxFamily[];
+  outcomeCode?: OutcomeCode[];
   sourceSystem?: string;
   windowMinutes?: number;
+}
+
+/**
+ * How an outcome resolved, coarsely. Operators triage by severity long before
+ * they care about the specific code: "are we declining more than usual" comes
+ * first, "which code" second. Soft declines are ordinary customer-side
+ * outcomes; hard declines indicate a card, format or upstream problem.
+ */
+export type OutcomeSeverity = "approved" | "soft_decline" | "hard_decline";
+
+export const OUTCOME_SEVERITY: Record<OutcomeCode, OutcomeSeverity> = {
+  approved: "approved",
+  insufficient_funds: "soft_decline",
+  exceeds_limit: "soft_decline",
+  do_not_honor: "hard_decline",
+  invalid_card: "hard_decline",
+  format_error: "hard_decline",
+  issuer_unavailable: "hard_decline",
+};
+
+export function outcomesOfSeverity(severity: OutcomeSeverity): OutcomeCode[] {
+  return OUTCOME_CODES.filter((code) => OUTCOME_SEVERITY[code] === severity);
 }
 
 export interface TrendPoint {

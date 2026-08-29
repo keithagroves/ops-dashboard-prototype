@@ -32,7 +32,14 @@ const ORDER: ClearableKey[] = ["tenantId", "eftVendor", "messageType", "txFamily
 export function activeFilters(filters: QueryFilters): ActiveFilter[] {
   const isGlobal = filters.role === "global";
   return ORDER.filter((key) => key !== "tenantId" || isGlobal)
-    .map((key) => ({ key, label: LABELS[key], value: filters[key] }))
+    .map((key) => {
+      const raw = filters[key];
+      // A set-valued filter is one chip listing its values, not one chip per
+      // value: "Vendor: vendor-a, vendor-c" is a single decision the operator
+      // made and should be undone in one click.
+      const value = Array.isArray(raw) ? raw.join(", ") : raw;
+      return { key, label: LABELS[key], value };
+    })
     .filter((f): f is ActiveFilter => typeof f.value === "string" && f.value.length > 0);
 }
 

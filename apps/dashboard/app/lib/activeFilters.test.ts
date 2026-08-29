@@ -41,17 +41,31 @@ describe("activeFilters", () => {
   });
 
   it("still reports a tenant session's other filters", () => {
-    const active = activeFilters(tenant({ eftVendor: "vendor-a" }));
+    const active = activeFilters(tenant({ eftVendor: ["vendor-a"] }));
     assert.deepEqual(active, [{ key: "eftVendor", label: "Vendor", value: "vendor-a" }]);
+  });
+
+  it("renders a multi-value filter as one chip listing its values", () => {
+    // One chip, not one per value: selecting two vendors is a single decision
+    // the operator made, and should be undone in a single click.
+    assert.deepEqual(activeFilters(global({ eftVendor: ["vendor-a", "vendor-c"] })), [
+      { key: "eftVendor", label: "Vendor", value: "vendor-a, vendor-c" },
+    ]);
+  });
+
+  it("ignores an empty set", () => {
+    // An empty selection means "no constraint", so it is not a narrowing to report.
+    assert.deepEqual(activeFilters(global({ eftVendor: [] })), []);
+    assert.equal(hasActiveFilters(global({ messageType: [] })), false);
   });
 
   it("lists every applied filter in a stable order", () => {
     const active = activeFilters(
       global({
-        outcomeCode: "approved",
-        eftVendor: "vendor-a",
+        outcomeCode: ["approved"],
+        eftVendor: ["vendor-a"],
         tenantId: "tenant-01",
-        messageType: "auth_request",
+        messageType: ["auth_request"],
       }),
     );
     assert.deepEqual(
@@ -63,14 +77,14 @@ describe("activeFilters", () => {
 
 describe("clearAllFilters", () => {
   it("clears the narrowings but keeps role and window", () => {
-    const cleared = clearAllFilters(global({ eftVendor: "vendor-a", outcomeCode: "approved", windowMinutes: 30 }));
+    const cleared = clearAllFilters(global({ eftVendor: ["vendor-a"], outcomeCode: ["approved"], windowMinutes: 30 }));
     assert.deepEqual(cleared, { role: "global", tenantId: undefined, windowMinutes: 30 });
   });
 
   it("keeps a tenant session pinned to its own tenant", () => {
     // Clearing this client-side would not widen anything - the API re-derives
     // it from the token - but it would blank the UI's own scope label.
-    const cleared = clearAllFilters(tenant({ eftVendor: "vendor-a" }));
+    const cleared = clearAllFilters(tenant({ eftVendor: ["vendor-a"] }));
     assert.equal(cleared.role, "tenant");
     assert.equal(cleared.tenantId, "tenant-07");
   });

@@ -38,19 +38,47 @@ describe("filtersFromQuery — parsing", () => {
       },
       GLOBAL,
     );
-    assert.equal(filters.eftVendor, "vendor-a");
-    assert.equal(filters.messageType, "auth_request");
-    assert.equal(filters.txFamily, "purchase");
-    assert.equal(filters.outcomeCode, "approved");
+    assert.deepEqual(filters.eftVendor, ["vendor-a"]);
+    assert.deepEqual(filters.messageType, ["auth_request"]);
+    assert.deepEqual(filters.txFamily, ["purchase"]);
+    assert.deepEqual(filters.outcomeCode, ["approved"]);
     assert.equal(filters.sourceSystem, "pos");
     assert.equal(filters.windowMinutes, 30);
   });
 
+  it("reads a repeated key as a set", () => {
+    // The form the dashboard sends: ?eftVendor=vendor-a&eftVendor=vendor-c
+    const filters = filtersFromQuery({ eftVendor: ["vendor-a", "vendor-c"] }, GLOBAL);
+    assert.deepEqual(filters.eftVendor, ["vendor-a", "vendor-c"]);
+  });
+
+  it("also accepts a comma-separated set for hand-typed URLs", () => {
+    const filters = filtersFromQuery({ messageType: "auth_request,reversal" }, GLOBAL);
+    assert.deepEqual(filters.messageType, ["auth_request", "reversal"]);
+  });
+
+  it("trims members and drops empty ones", () => {
+    assert.deepEqual(filtersFromQuery({ eftVendor: " vendor-a , vendor-c ,, " }, GLOBAL).eftVendor, [
+      "vendor-a",
+      "vendor-c",
+    ]);
+  });
+
   it("treats empty strings as absent", () => {
-    const filters = filtersFromQuery({ eftVendor: "", tenantId: "", sourceSystem: "" }, GLOBAL);
-    assert.equal(filters.eftVendor, undefined);
+    const filters = filtersFromQuery({ tenantId: "", sourceSystem: "" }, GLOBAL);
     assert.equal(filters.tenantId, undefined);
     assert.equal(filters.sourceSystem, undefined);
+  });
+
+  it("yields an empty set for a present-but-unusable key, so validation rejects it", () => {
+    // Not undefined: `?eftVendor=` is a client bug, and reading it as "no
+    // constraint" would silently widen the result set instead of 400ing.
+    assert.deepEqual(filtersFromQuery({ eftVendor: "" }, GLOBAL).eftVendor, []);
+    assert.deepEqual(filtersFromQuery({ eftVendor: [] }, GLOBAL).eftVendor, []);
+  });
+
+  it("leaves an unsupplied set undefined, meaning no constraint", () => {
+    assert.equal(filtersFromQuery({}, GLOBAL).eftVendor, undefined);
   });
 
   it("leaves windowMinutes undefined when not supplied, so the default applies", () => {
@@ -65,9 +93,10 @@ describe("filtersFromQuery — parsing", () => {
     assert.ok(Number.isNaN(filtersFromQuery({ windowMinutes: "" }, GLOBAL).windowMinutes));
   });
 
-  it("ignores non-string filter values rather than coercing them", () => {
-    const filters = filtersFromQuery({ eftVendor: ["vendor-a"], messageType: 42 }, GLOBAL);
-    assert.equal(filters.eftVendor, undefined);
-    assert.equal(filters.messageType, undefined);
+  it("drops non-string members rather than coercing them", () => {
+    // The survivors are still enum-checked by validateFilters; what matters
+    // here is that a number never becomes the string "42".
+    assert.deepEqual(filtersFromQuery({ messageType: 42 }, GLOBAL).messageType, []);
+    assert.deepEqual(filtersFromQuery({ eftVendor: ["vendor-a", 42] }, GLOBAL).eftVendor, ["vendor-a"]);
   });
 });

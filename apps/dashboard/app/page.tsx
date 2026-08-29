@@ -48,7 +48,10 @@ function Dashboard({
   const patch = useCallback((p: Partial<QueryFilters>) => setFilters((f) => ({ ...f, ...p })), []);
   const selectTenant = useCallback((tenantId: string | undefined) => patch({ tenantId }), [patch]);
   const selectOutcome = useCallback(
-    (outcomeCode: string | undefined) => patch({ outcomeCode: outcomeCode as QueryFilters["outcomeCode"] }),
+    // Clicking a bar selects that one code, replacing whatever severity band
+    // the sidebar had selected — a deliberate narrowing, not an addition.
+    (outcomeCode: string | undefined) =>
+      patch({ outcomeCode: outcomeCode ? ([outcomeCode] as QueryFilters["outcomeCode"]) : undefined }),
     [patch],
   );
 

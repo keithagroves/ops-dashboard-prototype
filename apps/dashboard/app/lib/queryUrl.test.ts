@@ -8,10 +8,10 @@ describe("buildUrl", () => {
     const filters: QueryFilters = {
       role: "global",
       tenantId: "tenant-07",
-      eftVendor: "vendor-b",
-      messageType: "auth_request",
-      txFamily: "purchase",
-      outcomeCode: "approved",
+      eftVendor: ["vendor-b"],
+      messageType: ["auth_request"],
+      txFamily: ["purchase"],
+      outcomeCode: ["approved"],
       sourceSystem: "conn-01",
       windowMinutes: 30,
     };
@@ -27,6 +27,22 @@ describe("buildUrl", () => {
     assert.equal(url.searchParams.get("outcomeCode"), "approved");
     assert.equal(url.searchParams.get("sourceSystem"), "conn-01");
     assert.equal(url.searchParams.get("windowMinutes"), "30");
+  });
+
+  it("repeats a key once per value for set-valued filters", () => {
+    const url = new URL(
+      buildUrl("/api/query", { role: "global", eftVendor: ["vendor-a", "vendor-c"] }, "token"),
+    );
+
+    assert.deepEqual(url.searchParams.getAll("eftVendor"), ["vendor-a", "vendor-c"]);
+  });
+
+  it("omits a set-valued filter that is empty rather than sending a bare key", () => {
+    // The API rejects an empty set, and an empty selection in the UI means
+    // "no constraint" - so it must not reach the wire at all.
+    const url = new URL(buildUrl("/api/query", { role: "global", eftVendor: [] }, "token"));
+
+    assert.equal(url.searchParams.has("eftVendor"), false);
   });
 
   it("never sends the client-provided role", () => {

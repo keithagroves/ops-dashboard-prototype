@@ -4,42 +4,43 @@ import { memo, useCallback } from "react";
 import {
   EFT_VENDORS,
   MESSAGE_TYPES,
-  OUTCOME_CODES,
   TX_FAMILIES,
+  outcomesOfSeverity,
   type AuthClaims,
+  type OutcomeSeverity,
   type QueryFilters,
 } from "@nymbus/shared";
 import { LiveIndicator } from "./LiveIndicator";
 import { SegmentedControl, type Segment } from "./SegmentedControl";
+import { CheckboxGroup } from "./CheckboxGroup";
 import { hasActiveFilters } from "../lib/activeFilters";
+import { severityOf } from "../lib/outcomeSeverity";
 
 interface SelectOption {
   value: string;
   label: string;
 }
 
-const EFT_VENDOR_OPTIONS: SelectOption[] = [
-  { value: "", label: "All vendors" },
-  ...EFT_VENDORS.map((value) => ({ value, label: value })),
-];
-const MESSAGE_TYPE_OPTIONS: SelectOption[] = [
-  { value: "", label: "All types" },
-  ...MESSAGE_TYPES.map((value) => ({ value, label: value })),
-];
 const TX_FAMILY_OPTIONS: SelectOption[] = [
   { value: "", label: "All families" },
   ...TX_FAMILIES.map((value) => ({ value, label: value })),
 ];
-const OUTCOME_OPTIONS: SelectOption[] = [
-  { value: "", label: "All outcomes" },
-  ...OUTCOME_CODES.map((value) => ({ value, label: value })),
-];
+
 // Three exclusive options changed constantly during triage: visible as a
 // segmented control rather than hidden behind a dropdown.
 const WINDOW_SEGMENTS: Segment[] = [
   { value: "5", label: "5m" },
   { value: "15", label: "15m" },
   { value: "30", label: "30m" },
+];
+
+// "Are we declining more than usual" comes before "which code", and no single
+// outcome code answers it — each of these maps to a set.
+const SEVERITY_SEGMENTS: Segment[] = [
+  { value: "", label: "All" },
+  { value: "approved", label: "Appr" },
+  { value: "soft_decline", label: "Soft" },
+  { value: "hard_decline", label: "Hard" },
 ];
 
 const Select = memo(function Select({
@@ -88,29 +89,37 @@ export function FilterSidebar({
   onSignOut: () => void;
   onClearAll: () => void;
 }) {
-  // SSE freshness props update this shell for every frame. Stable callbacks
-  // plus memoized Select controls keep those updates from re-rendering every
-  // selector and rebuilding every option list.
+  // LiveIndicator changes every second, which re-renders this shell. Stable
+  // callbacks plus memoized controls keep those clock ticks from re-rendering
+  // every selector and rebuilding every option list.
   const changeVendor = useCallback(
-    (value: string) => onChange({ eftVendor: (value || undefined) as QueryFilters["eftVendor"] }),
+    (values: string[] | undefined) => onChange({ eftVendor: values as QueryFilters["eftVendor"] }),
     [onChange],
   );
   const changeMessageType = useCallback(
-    (value: string) => onChange({ messageType: (value || undefined) as QueryFilters["messageType"] }),
+    (values: string[] | undefined) => onChange({ messageType: values as QueryFilters["messageType"] }),
     [onChange],
   );
   const changeTxFamily = useCallback(
-    (value: string) => onChange({ txFamily: (value || undefined) as QueryFilters["txFamily"] }),
+    (value: string) =>
+      onChange({ txFamily: value ? ([value] as QueryFilters["txFamily"]) : undefined }),
     [onChange],
   );
-  const changeOutcome = useCallback(
-    (value: string) => onChange({ outcomeCode: (value || undefined) as QueryFilters["outcomeCode"] }),
+  const changeSeverity = useCallback(
+    (value: string) =>
+      onChange({
+        outcomeCode: value ? (outcomesOfSeverity(value as OutcomeSeverity) as QueryFilters["outcomeCode"]) : undefined,
+      }),
     [onChange],
   );
-  const changeWindow = useCallback(
-    (value: string) => onChange({ windowMinutes: Number(value) }),
-    [onChange],
-  );
+  const changeWindow = useCallback((value: string) => onChange({ windowMinutes: Number(value) }), [onChange]);
+
+  // The severity control shows a selection only when the chosen codes are
+  // exactly one severity band. Clicking a single bar in the outcome chart
+  // selects one code, which is narrower than any band — that shows as "All"
+  // here rather than mislabelling the state, and the chip row reports the
+  // actual codes.
+  const severity = severityOf(filters.outcomeCode);
 
   return (
     <aside className="order-first flex w-full shrink-0 flex-col self-start rounded-lg border border-neutral-800 bg-neutral-950 lg:sticky lg:top-6 lg:order-last lg:max-h-[calc(100vh-3rem)] lg:w-60">
@@ -127,32 +136,34 @@ export function FilterSidebar({
           onChange={changeWindow}
         />
 
-        <Select
-          label="EFT vendor"
-          value={filters.eftVendor || ""}
-          onChange={changeVendor}
-          options={EFT_VENDOR_OPTIONS}
+        <SegmentedControl
+          label="Outcome"
+          value={severity ?? ""}
+          options={SEVERITY_SEGMENTS}
+          onChange={changeSeverity}
         />
 
-        <Select
+        <CheckboxGroup
+          label="EFT vendor"
+          allLabel="All vendors"
+          options={EFT_VENDORS}
+          selected={filters.eftVendor}
+          onChange={changeVendor}
+        />
+
+        <CheckboxGroup
           label="Message type"
-          value={filters.messageType || ""}
+          allLabel="All types"
+          options={MESSAGE_TYPES}
+          selected={filters.messageType}
           onChange={changeMessageType}
-          options={MESSAGE_TYPE_OPTIONS}
         />
 
         <Select
           label="Tx family"
-          value={filters.txFamily || ""}
+          value={filters.txFamily?.[0] ?? ""}
           onChange={changeTxFamily}
           options={TX_FAMILY_OPTIONS}
-        />
-
-        <Select
-          label="Outcome"
-          value={filters.outcomeCode || ""}
-          onChange={changeOutcome}
-          options={OUTCOME_OPTIONS}
         />
 
         {hasActiveFilters(filters) && (

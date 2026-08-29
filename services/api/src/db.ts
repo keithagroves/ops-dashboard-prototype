@@ -51,17 +51,24 @@ export function validateFilters(filters: QueryFilters): void {
   if (filters.windowMinutes !== undefined && !VALID_WINDOW_MINUTES.includes(filters.windowMinutes)) {
     throw new ValidationError(`windowMinutes must be one of ${VALID_WINDOW_MINUTES.join(", ")}`);
   }
-  if (filters.eftVendor !== undefined && !(EFT_VENDORS as readonly string[]).includes(filters.eftVendor)) {
-    throw new ValidationError(`eftVendor must be one of ${EFT_VENDORS.join(", ")}`);
+  validateEnumSet("eftVendor", filters.eftVendor, EFT_VENDORS);
+  validateEnumSet("messageType", filters.messageType, MESSAGE_TYPES);
+  validateEnumSet("txFamily", filters.txFamily, TX_FAMILIES);
+  validateEnumSet("outcomeCode", filters.outcomeCode, OUTCOME_CODES);
+}
+
+// An empty array is rejected rather than ignored. `?eftVendor=` with no value
+// is far more likely to be a client bug than a request to match everything,
+// and treating it as "no constraint" would silently widen the result set.
+function validateEnumSet(name: string, values: readonly string[] | undefined, allowed: readonly string[]): void {
+  if (values === undefined) return;
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new ValidationError(`${name} must list at least one of ${allowed.join(", ")}`);
   }
-  if (filters.messageType !== undefined && !(MESSAGE_TYPES as readonly string[]).includes(filters.messageType)) {
-    throw new ValidationError(`messageType must be one of ${MESSAGE_TYPES.join(", ")}`);
-  }
-  if (filters.txFamily !== undefined && !(TX_FAMILIES as readonly string[]).includes(filters.txFamily)) {
-    throw new ValidationError(`txFamily must be one of ${TX_FAMILIES.join(", ")}`);
-  }
-  if (filters.outcomeCode !== undefined && !(OUTCOME_CODES as readonly string[]).includes(filters.outcomeCode)) {
-    throw new ValidationError(`outcomeCode must be one of ${OUTCOME_CODES.join(", ")}`);
+  for (const value of values) {
+    if (!allowed.includes(value)) {
+      throw new ValidationError(`${name} must be one of ${allowed.join(", ")}`);
+    }
   }
 }
 
@@ -97,22 +104,21 @@ export function buildWhere(
     conditions.push(`tenant_id = $${params.length}`);
   }
 
-  if (filters.eftVendor) {
-    params.push(filters.eftVendor);
-    conditions.push(`eft_vendor = $${params.length}`);
-  }
-  if (filters.messageType) {
-    params.push(filters.messageType);
-    conditions.push(`message_type = $${params.length}`);
-  }
-  if (filters.txFamily) {
-    params.push(filters.txFamily);
-    conditions.push(`tx_family = $${params.length}`);
-  }
-  if (filters.outcomeCode) {
-    params.push(filters.outcomeCode);
-    conditions.push(`outcome_code = $${params.length}`);
-  }
+  // `= ANY($n::text[])` rather than an expanded `IN ($1,$2,...)`: one
+  // placeholder per filter regardless of how many values it carries, so the
+  // parameter numbering stays trivially correct as filters come and go, and
+  // the plan is not recompiled for every distinct selection size.
+  const anyOf = (column: string, values: readonly string[] | undefined) => {
+    if (!values || values.length === 0) return;
+    params.push([...values]);
+    conditions.push(`${column} = ANY($${params.length}::text[])`);
+  };
+
+  anyOf("eft_vendor", filters.eftVendor);
+  anyOf("message_type", filters.messageType);
+  anyOf("tx_family", filters.txFamily);
+  anyOf("outcome_code", filters.outcomeCode);
+
   if (filters.sourceSystem) {
     params.push(filters.sourceSystem);
     conditions.push(`source_system = $${params.length}`);

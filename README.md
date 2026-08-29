@@ -129,8 +129,9 @@ need Docker, bind live ports, or connect to Postgres, Redis, or Kafka.
 - `services/generator/src/config.test.ts` — safe defaults plus valid and invalid
   operator environment overrides.
 - `apps/dashboard/app/lib/*.test.ts` — approval-rate maths (empty window is
-  `null`, not `0`), tenant-health thresholds, active-filter behavior, and API
-  URL serialization without leaking client-provided role.
+  `null`, not `0`), tenant-health thresholds, active-filter behavior, outcome
+  severity banding, and API URL serialization without leaking client-provided
+  role.
 
 The two tenant-scoping tests were verified by deliberately reintroducing each
 bug and confirming the suite goes red, rather than trusting a green run.

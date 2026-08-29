@@ -90,7 +90,7 @@ describe("GET /api/query", () => {
     assert.deepEqual(response.json(), EMPTY_RESULT);
     assert.equal(received?.role, "tenant");
     assert.equal(received?.tenantId, "tenant-07");
-    assert.equal(received?.eftVendor, "vendor-b");
+    assert.deepEqual(received?.eftVendor, ["vendor-b"]);
     assert.equal(received?.windowMinutes, 30);
     await app.close();
   });
