@@ -2,7 +2,8 @@ import { Kafka } from "kafkajs";
 import { Pool } from "pg";
 import Redis from "ioredis";
 import { KAFKA_TOPIC, REDIS_UPDATE_CHANNEL, type TxEvent } from "@nymbus/shared";
-import { insertBatch } from "./batchWriter";
+import { insertBatch, type IngestRecord } from "./batchWriter";
+import { validateTxEvent } from "./validate";
 
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || "localhost:9092").split(",");
 const PG_URL = process.env.DATABASE_URL || "postgres://nymbus:nymbus@localhost:5433/ops_dashboard";
@@ -11,7 +12,17 @@ const RETENTION_MINUTES = Number(process.env.RETENTION_MINUTES || 30);
 
 async function main() {
   const pool = new Pool({ connectionString: PG_URL });
+  // Both pg's Pool and ioredis's client are EventEmitters that throw and
+  // crash the process on an unhandled 'error' event - discovered by
+  // actually restarting Postgres under a live consumer, not by inspection.
+  pool.on("error", (err) => {
+    console.error("[consumer] postgres pool error (will retry on next batch):", err.message);
+  });
+
   const redis = new Redis(REDIS_URL);
+  redis.on("error", (err) => {
+    console.error("[consumer] redis connection error (publish will fail and be logged, not fatal):", err.message);
+  });
 
   const kafka = new Kafka({ clientId: "tx-consumer", brokers: KAFKA_BROKERS });
   const consumer = kafka.consumer({ groupId: "tx-consumer-group" });
@@ -29,20 +40,44 @@ async function main() {
     eachBatch: async ({ batch, resolveOffset, heartbeat, commitOffsetsIfNecessary, isRunning, isStale }) => {
       if (!isRunning() || isStale()) return;
 
-      const events: TxEvent[] = [];
+      const records: IngestRecord[] = [];
       for (const message of batch.messages) {
         if (!message.value) continue;
+        let parsed: unknown;
         try {
-          events.push(JSON.parse(message.value.toString()) as TxEvent);
+          parsed = JSON.parse(message.value.toString());
         } catch {
-          console.warn("[consumer] skipping malformed message");
+          console.warn(
+            `[consumer] skipping malformed JSON: topic=${batch.topic} partition=${batch.partition} offset=${message.offset}`,
+          );
+          continue;
         }
+        if (!validateTxEvent(parsed)) {
+          console.warn(
+            `[consumer] skipping invalid TxEvent shape: topic=${batch.topic} partition=${batch.partition} offset=${message.offset}`,
+          );
+          continue;
+        }
+        records.push({ event: parsed as TxEvent, partition: batch.partition, offset: message.offset });
       }
 
-      if (events.length > 0) {
-        await insertBatch(pool, events);
-        totalWritten += events.length;
-        await redis.publish(REDIS_UPDATE_CHANNEL, JSON.stringify({ count: events.length, at: Date.now() }));
+      // insertBatch is intentionally left to throw on a genuine failure
+      // (e.g. Postgres unreachable) - offsets below won't resolve, so
+      // kafkajs replays this batch rather than silently losing it. The
+      // records that make it this far have already passed validation, so
+      // ON CONFLICT DO NOTHING is what keeps that replay from duplicating
+      // rows instead of a second application-level validation pass.
+      if (records.length > 0) {
+        await insertBatch(pool, records);
+        totalWritten += records.length;
+
+        // A Redis outage should never block the Kafka offset commit below -
+        // the write already succeeded and is the thing that matters.
+        try {
+          await redis.publish(REDIS_UPDATE_CHANNEL, JSON.stringify({ count: records.length, at: Date.now() }));
+        } catch (err) {
+          console.warn(`[consumer] failed to publish update notification: ${(err as Error).message}`);
+        }
       }
 
       for (const message of batch.messages) {
@@ -60,11 +95,13 @@ async function main() {
   // Stand-in for production's partition-drop retention: cheap enough at
   // demo volume, and keeps the "rolling window" feeling honest live.
   setInterval(async () => {
-    const result = await pool.query(
-      `DELETE FROM tx_events WHERE event_ts < now() - interval '${RETENTION_MINUTES} minutes'`,
-    );
-    if (result.rowCount) {
-      console.log(`[consumer] retention cleanup removed ${result.rowCount} rows`);
+    try {
+      const result = await pool.query(
+        `DELETE FROM tx_events WHERE event_ts < now() - interval '${RETENTION_MINUTES} minutes'`,
+      );
+      console.log(`[consumer] retention cleanup removed ${result.rowCount ?? 0} rows`);
+    } catch (err) {
+      console.error(`[consumer] retention cleanup failed, will retry next interval: ${(err as Error).message}`);
     }
   }, 30_000);
 }
