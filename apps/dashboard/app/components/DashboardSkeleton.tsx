@@ -13,7 +13,7 @@ import { Panel, Skeleton } from "./Panel";
  */
 export function DashboardSkeleton() {
   return (
-    <>
+    <div className="deferred-in flex flex-col gap-4">
       <div className="flex flex-wrap gap-3">
         {["transactions in window", "approval rate", "p50 latency", "p95 latency"].map((label) => (
           <div
@@ -47,6 +47,6 @@ export function DashboardSkeleton() {
           ))}
         </div>
       </Panel>
-    </>
+    </div>
   );
 }

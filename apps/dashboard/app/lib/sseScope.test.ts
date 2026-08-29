@@ -22,12 +22,14 @@ describe("scopeKeyOf — what may stay on screen while a new stream connects", (
     assert.ok(sameScope(global(), global({ messageType: ["auth_request"], txFamily: ["purchase"] })));
   });
 
-  it("treats a tenant drill-down as a scope change", () => {
-    // Platform-wide numbers must not sit under a "tenant-01" heading, even
-    // dimmed - the operator would misread whose data they are looking at.
-    assert.ok(!sameScope(global(), global({ tenantId: "tenant-01" })));
-    assert.ok(!sameScope(global({ tenantId: "tenant-01" }), global({ tenantId: "tenant-02" })));
-    assert.ok(!sameScope(global({ tenantId: "tenant-01" }), global()));
+  it("treats a tenant drill-down as the same scope", () => {
+    // A global operator is authorized for every tenant, so drilling in is a
+    // filter, not a change of viewer. Blanking the dashboard here flickered on
+    // every tenant click for no benefit - the chip row already names the
+    // tenant the moment it is clicked.
+    assert.ok(sameScope(global(), global({ tenantId: "tenant-01" })));
+    assert.ok(sameScope(global({ tenantId: "tenant-01" }), global({ tenantId: "tenant-02" })));
+    assert.ok(sameScope(global({ tenantId: "tenant-01" }), global()));
   });
 
   it("treats a different token as a scope change", () => {

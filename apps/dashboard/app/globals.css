@@ -24,3 +24,27 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/*
+ * Holds a loading placeholder invisible for a moment before fading it in, so a
+ * response that beats the delay never shows one at all. A skeleton that
+ * appears and vanishes inside ~100ms reads as a flash, not as feedback - the
+ * same reason the stale dim is delayed. Layout is reserved the whole time
+ * because the element is transparent, not absent.
+ */
+@keyframes deferred-in {
+  to {
+    opacity: 1;
+  }
+}
+
+.deferred-in {
+  opacity: 0;
+  animation: deferred-in 150ms ease-out 200ms forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deferred-in {
+    animation-duration: 1ms;
+  }
+}
