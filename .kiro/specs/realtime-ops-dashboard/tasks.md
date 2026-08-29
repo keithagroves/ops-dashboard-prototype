@@ -79,4 +79,5 @@ This is a retroactive task record: the prototype was built before this spec work
 ## Follow-up hardening
 
 - [x] 10. Close the audited prototype deviations: 1,000-row batch cap, zero-filled trend buckets, explicit malformed-frame/empty UI states, Redis publish retries, strict deterministic incident mode, and a queryable dropped-event metric.
-- [ ] 11. Validate at production-representative scale: sustained 100–150 TPS, a full 24-hour window, and 48-hour source/rollup coverage for prior-period comparison.
+- [x] 11.1 Run a short end-to-end 150 TPS smoke and capture Generator delivery/drop counters, Kafka lag, and cache-expired API query latency (`evidence/150-tps-smoke.md`).
+- [ ] 11.2 Validate at production-representative duration: a 24-hour 100–150 TPS soak, a full 24-hour query window, and 48-hour source/rollup coverage for prior-period comparison.

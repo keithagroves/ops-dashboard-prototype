@@ -14,6 +14,7 @@ import {
 import { config } from "./config";
 import { createIncidentController } from "./incident";
 import { startMetricsServer, type GeneratorMetricsSnapshot } from "./metrics";
+import { startFixedRate } from "./pacer";
 import { createTenantPicker } from "./traffic";
 
 const { tenants, pick: pickTenant } = createTenantPicker(
@@ -136,9 +137,8 @@ async function main() {
   const metrics: GeneratorMetricsSnapshot = { sent: 0, dropped: 0, inFlight: 0 };
   startMetricsServer(() => ({ ...metrics }), config.metricsPort);
   const MAX_IN_FLIGHT = 500;
-  const intervalMs = 1000 / config.tps;
 
-  setInterval(() => {
+  startFixedRate(() => {
     maybeStartIncident();
     const event = buildEvent();
 
@@ -170,7 +170,7 @@ async function main() {
       .finally(() => {
         metrics.inFlight -= 1;
       });
-  }, intervalMs);
+  }, config.tps);
 
   setInterval(() => {
     console.log(

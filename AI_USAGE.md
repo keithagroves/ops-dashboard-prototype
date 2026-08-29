@@ -14,7 +14,7 @@ reviewed by a model that had not written it.
 | **Kiro IDE** | Spec-driven development: turning an open-ended brief into durable requirements, a technical design, and a task breakdown | [`.kiro/specs/realtime-ops-dashboard/`](.kiro/specs/realtime-ops-dashboard/) — requirements, design, tasks |
 | **CodeSwim IDE** | Thinking through the pipeline visually with Mermaid diagrams — producer/consumer flow, failure paths, what happens on replay and restart | [`overview.md`](overview.md) — a Mermaid architecture diagram whose nodes link into the source, plus an annotated index of every file |
 | **Claude Code** | Most of the planning-as-you-go and the bulk of the implementation: the dashboard UX pass, authentication, the test suites, filter behaviour, and the loading/transition work | Most of `apps/dashboard` and `services/api` |
-| **Codex** | Adversarial review of code it had not written — a second opinion whose job was to find what the builder missed | The six issues in ["Robustness fixes from an external audit"](README.md#robustness-fixes-from-an-external-audit) |
+| **Codex** | Adversarial review of code it had not written — a second opinion whose job was to find what the builder missed | The concrete issues and remediations in ["Robustness fixes from an external audit"](README.md#robustness-fixes-from-an-external-audit) |
 
 ## How that division actually paid off
 
@@ -48,7 +48,7 @@ time.
 
 **A reviewer that did not write the code.** This is the part I would repeat.
 Asking the model that built something to review it tends to produce agreement.
-Running Codex over the finished prototype produced six concrete defects instead
+Running Codex over the finished prototype produced concrete defects instead
 — including Kafka replay duplicating rows (199 duplicate groups in the live
 database), unbounded in-flight produce calls, SSE query amplification, and a
 single malformed message being able to halt ingestion indefinitely. All six are
@@ -72,6 +72,11 @@ Verification was deliberately empirical, not assumed:
 - Dependency failure was tested by stopping Postgres under a live API instance,
   which is how an unhandled `pg.Pool` error event — a process-killer that no
   amount of reading would have surfaced — was found.
+- A 150 TPS end-to-end run revealed that Node truncated the Generator's
+  fractional interval and overshot the configured rate. Rather than presenting
+  the higher number as "better throughput," the timer was replaced with a
+  deadline-based pacer, tested deterministically, and the run repeated at an
+  observed 149.9 acknowledged TPS with zero drops.
 
 Where I could not verify something, it is stated as a limitation rather than
 presented as done. The remaining prototype/production gaps are listed explicitly

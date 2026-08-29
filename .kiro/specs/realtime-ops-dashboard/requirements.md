@@ -10,6 +10,8 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 
 **Prototype scope:** This document describes the working prototype, which compresses the 24-hour window to 5–30 minute windows to make the pipeline visibly live during a short demonstration. Authentication uses signed demo JWTs and query filters are validated server-side; the prototype is still intentionally not production-ready or feature-complete.
 
+**Priority and authority:** These criteria are an implementation aid derived from the open-ended exercise, not a claim that every edge case carries equal evaluation weight. The exercise's primary measures are architecture and tradeoff reasoning, effective AI-assisted delivery, a working thin vertical slice, communication, and handling ambiguity. Within the implementation, the hard constraints are keeping metrics off the authorization path, enforcing tenant isolation, keeping real-time banking data inside the existing infrastructure, and demonstrating useful near-real-time filtering and drill-down.
+
 **Out of scope:** Historical data beyond 24 hours flows to the existing OpenTelemetry/Grafana pipeline. The dashboard is read-only — no action or approval flows are in scope.
 
 ## Glossary
@@ -187,8 +189,9 @@ The dashboard delivers a rolling time-window view of transaction activity — vo
 4. WHEN an SSE `data:` frame arrives, THE Dashboard SHALL parse the payload as a `QueryResult` and update all four panel components within 200 milliseconds without triggering a full page re-render.
 5. IF an SSE `data:` frame payload cannot be parsed as a valid `QueryResult`, THEN THE Dashboard SHALL retain the last successfully rendered panel state and display an error indicator without disrupting the live SSE connection.
 6. WHEN no `QueryResult` data has been received from the SSE stream since the connection was established, THE Dashboard SHALL display a loading state in place of the four panel components.
-7. WHEN the authenticated user or active filters change, THE Dashboard SHALL NOT render a snapshot received under the prior scope while the replacement stream is connecting.
-8. WHEN a detail filter changes for a global caller, THE Dashboard SHALL keep the platform tenant navigator mounted while the filter-scoped panels load.
+7. WHEN the authenticated user or entitlement role changes, THE Dashboard SHALL NOT render a snapshot received under the prior identity scope while the replacement stream is connecting.
+8. WHEN filters change within the same authenticated scope, THE Dashboard MAY retain the prior panel snapshot to preserve layout only while it is visibly marked as updating, dimmed, and non-interactive; it SHALL replace that snapshot when the first result for the new filters arrives.
+9. WHEN a detail filter changes for a global caller, THE Dashboard SHALL keep the platform tenant navigator mounted while the filter-scoped panels load.
 
 ---
 

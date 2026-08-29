@@ -45,7 +45,7 @@ Two properties drive every choice below:
 
 ### Dashboard (`apps/dashboard`)
 - `lib/auth.ts` manages the demo session; the UI decodes claims only for presentation while the API performs all security decisions.
-- `lib/useSse.ts` reopens `EventSource` on scope changes and keys panel snapshots to both token and filters, preventing a prior tenant/global payload from rendering while the replacement stream connects. Tenant navigation is retained separately for the same token, so detail-filter changes do not unmount it.
+- `lib/useSse.ts` reopens `EventSource` on filter changes and keys current snapshots to both token and filters. A different token or entitlement role never reuses prior data. Within the same authorized scope, the last panel snapshot may remain briefly as explicitly dimmed, non-interactive "updating" content so fast filter and tenant drill-downs do not collapse the layout. Tenant navigation is retained separately for the same token, so detail-filter changes do not unmount it.
 - `FilterSidebar`, `TenantHealthSidebar`, `KpiRow`, `TrendChart`, `LatencyTrendChart`, `OutcomeBreakdown`, and `DrilldownTable` provide filters, tenant navigation, prior-period context, and raw drill-down. Clicking an outcome toggles the shared outcome filter.
 
 ## Data Models
@@ -92,7 +92,7 @@ Both routes verify the signed token before building filters. A tenant claim forc
 
 **Validates: Requirements 1, 17**
 
-`pg.Pool` and both `ioredis` clients have `error` listeners; a lost Postgres or Redis connection is logged and recovered from on the next call, not an unhandled crash. `/ready` reports the outage; `/health` (liveness) does not conflate "a dependency is down" with "this process needs to be restarted."
+`pg.Pool` and both `ioredis` clients have `error` listeners; the Redis subscriber also observes the initial `SUBSCRIBE` promise and keeps long-lived command retries open across reconnects. A lost Postgres or Redis connection is logged and recovered from rather than becoming an unhandled event or promise rejection. `/ready` reports the outage; `/health` (liveness) does not conflate "a dependency is down" with "this process needs to be restarted."
 
 ### Property 6: Query load scales with distinct filter combinations, not connected client count
 
@@ -116,11 +116,11 @@ A 400ms result cache keyed by filter signature collapses concurrent identical re
 
 ## Remaining Production Validation
 
-The prototype acceptance behaviors are implemented. What remains is evidence at production duration and volume rather than a known code-level deviation: a sustained 100–150 TPS soak, query-latency measurements over a genuinely full 24-hour window, and 48-hour source or rollup coverage for the preceding-period comparison. The compressed 5/15/30-minute windows remain an explicit prototype-scope choice permitted by Requirement 6.5.
+The prototype acceptance behaviors are implemented. A short 150 TPS end-to-end smoke sustained 149.9 acknowledged events/second with zero drops, 1–2 messages of moving-edge consumer lag, and 23.1ms p50 / 51.4ms p95 API latency across cache-expired samples; full evidence is in `evidence/150-tps-smoke.md`. What remains is production-duration evidence: a sustained 24-hour soak, query measurements over a genuinely full 24-hour window, and 48-hour source or rollup coverage for the preceding-period comparison. The compressed 5/15/30-minute windows remain an explicit prototype-scope choice permitted by Requirement 6.5.
 
 ## Audit Remediation
 
-An external code-review pass (run against the working prototype, not against this design doc) found six real defects, all reproduced and fixed:
+Successive external code-review passes (run against the working prototype, not against this design doc) found real defects, all reproduced and fixed:
 
 1. **Duplicate rows on Kafka replay** — offsets commit after the Postgres write, so a crash between "insert succeeded" and "offset committed" replays the batch; with no uniqueness constraint, replay duplicated rows (199 duplicate groups found live). Fixed with `UNIQUE (kafka_partition, kafka_offset)` on `tx_events` and `ON CONFLICT DO NOTHING` on the insert. Re-verified by forcing 5 consumer crashes mid-write: zero duplicates.
 2. **Unbounded in-flight Generator sends** — a new Kafka produce started every tick with no concurrency cap, risking unbounded memory growth under broker degradation. Fixed with a `MAX_IN_FLIGHT` guard that drops immediately once hit.
@@ -128,7 +128,8 @@ An external code-review pass (run against the working prototype, not against thi
 4. **Poison-message halt** — a structurally invalid but JSON-parseable message (e.g. `{}`) would fail the insert, throw before any offset resolved, and repeat forever. Fixed with `validate.ts`, which checks every field against the `TxEvent` contract before a record is allowed into the insert batch; invalid messages are logged (with topic/partition/offset) and skipped instead.
 5. **`/health` couldn't detect an outage; every error was a 400** — fixed with a real `/ready` check (pings Postgres and Redis, 503 if either fails) and a `ValidationError` type so genuine server errors return 500.
 6. **Unhandled `error` events could crash the whole process** — found while re-testing #5: `pg.Pool` and the `ioredis` clients are `EventEmitter`s that throw and crash the process on an unhandled `'error'` event. Neither the API's nor the consumer's Postgres pool, nor either service's Redis client, had a listener. Discovered by actually stopping Postgres under a live API instance (it died) rather than by code inspection. All four now have listeners; re-verified by restarting Postgres under both live processes with no crash.
-7. **Scope and comparison correctness** — filter changes could render the previous scope until the new stream delivered; malformed windows silently became the 15-minute default; 30-minute comparisons retained only 30 minutes; quiet tenants disappeared from the health navigator. Snapshots are now keyed to token+filters, malformed windows return 400, retention is at least 60 minutes, and the global health list always contains the known 50 tenants.
+7. **Scope and comparison correctness** — identity changes could render the previous caller's scope until the new stream delivered; malformed windows silently became the 15-minute default; 30-minute comparisons retained only 30 minutes; quiet tenants disappeared from the health navigator. Identity changes now clear prior data synchronously, same-scope filter transitions retain only visibly stale/non-interactive content, malformed windows return 400, retention is at least 60 minutes, and the global health list always contains the known 50 tenants.
+8. **Rejected Redis subscription could crash startup** — an `error` listener covered EventEmitter failures but not the separate `SUBSCRIBE` promise rejection. Subscriber commands now remain pending through reconnects, terminal rejection is contained and logged, and the singleton is reset for a bounded retry rather than terminating Node or remaining permanently unsubscribed.
 
 None of this was found by reading the code more carefully — it came from adversarial testing against the running system (crash loops, killing dependencies mid-request, feeding it malformed input), which is the same verification philosophy the Testing Strategy section describes.
 
@@ -137,10 +138,11 @@ None of this was found by reading the code more carefully — it came from adver
 Verification combines focused automated tests with adversarial checks against the running system. The self-contained suite covers authentication, token-derived tenant scope, Fastify route contracts, filter parsing/validation, SQL parameterization and zero-filled buckets, SSE notification scheduling, bounded batch writes, Redis retry policy, consumer payload boundaries, deterministic incident scheduling, traffic distribution, generator metrics, and dashboard data/URL/payload helpers. It runs without Docker or live service connections. Live checks exercise the distributed behaviors that isolated tests cannot establish on their own:
 
 - **Fire-and-forget capture (Req 1):** confirmed via the Generator's `sent`/`dropped` log line under normal operation (0 dropped at steady TPS).
+- **Representative peak load (Req 1.7/1.8):** an isolated 150 TPS Generator sustained 149.9 acknowledged TPS for approximately 75 seconds with zero drops while the Consumer kept Kafka lag at the 1–2 message moving edge; API queries measured 23.1ms p50 / 51.4ms p95. This short smoke exposed and led to a fix for fractional timer truncation; it does not replace the production-duration soak.
 - **Batched ingestion and crash recovery (Req 3):** killed the Consumer process mid-stream, confirmed the Postgres row count stalled, restarted it, confirmed `kafka-consumer-groups.sh --describe` showed lag return to 0 with no gap or duplicate rows.
 - **Tenant-scoped enforcement (Req 5):** signed in as both global and tenant demo users; direct attempts to supply a different role/tenant were ignored or constrained by the verified token, and missing/invalid tokens returned 401.
 - **Multi-instance fan-out (Req 4, 17):** ran two API instances on different ports against the same Postgres/Redis; confirmed both independently pushed live, identical-shape updates to two separate SSE connections from one Consumer publish.
 - **Incident mode and drill-down (Req 18, 13, 15):** enabled `INCIDENT_MODE`, watched the injected outcome spike appear in the browser's trend chart when filtered to the affected tenant, and confirmed the exact matching rows appeared in the drill-down table.
 - **Filter/drill-down UI (Req 11–15):** exercised global tenant navigation, a tenant-scoped session, vendor/outcome/window filters, KPI deltas, and outcome-bar click-to-filter in the live browser.
 
-Not yet verified at production-representative scale: sustained write throughput at the full 100–150 TPS peak, and query latency across a genuinely full 24-hour window rather than the compressed demo window.
+Not yet verified at production-representative duration: a 24-hour write soak at the 100–150 TPS peak, and query latency across a genuinely full 24-hour window rather than the compressed demo window.

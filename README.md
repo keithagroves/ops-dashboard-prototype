@@ -14,6 +14,32 @@ operations dashboard.
 - **AI usage:** [AI_USAGE.md](AI_USAGE.md).
 - **Next steps:** the production path at the end of this README.
 
+## Executive summary
+
+Nymbus needs a tenant-safe operational view of payment activity a few seconds
+behind live without adding latency or back-pressure to sub-500ms authorization.
+The recommendation is a best-effort event emitted from the Connector to the
+existing Kafka cluster, a replay-safe consumer writing the rolling operational
+window to Aurora PostgreSQL, Redis/Valkey carrying only cross-instance update
+signals, and the existing Next.js console receiving filtered results over SSE.
+
+This is the smallest design that fits the platform already in place. Kafka
+isolates transaction processing from metrics failures; Postgres supports both
+flexible drill-down and time-bucketed aggregates at the stated 100–150 TPS;
+Redis makes independently scaled API instances react to the same writes without
+becoming a second source of truth. Tenant scope comes from verified claims and
+is applied server-side to every query, and no real-time banking data leaves
+Nymbus-controlled infrastructure.
+
+The main alternatives were direct Postgres writes from the Connector, a
+Redis-plus-Postgres dual read store, polling or WebSockets instead of SSE, and a
+new specialist time-series database. They were rejected for hot-path coupling,
+unnecessary consistency/operational cost, unused protocol complexity, or new
+infrastructure that the current volume does not justify. The prototype uses
+compressed 5–30 minute windows so it can demonstrate the same rolling-query
+mechanics live; production extends retention to 48 hours (or adds rollups) for
+a 24-hour current/prior comparison and validates that choice with a soak test.
+
 ## Approach
 
 The implementation proves one deliberate vertical slice: emit best-effort telemetry
@@ -130,7 +156,9 @@ need Docker, bind live ports, or connect to Postgres, Redis, or Kafka.
   three-attempt Redis notification policy.
 - `services/generator/src/*.test.ts` — safe configuration, strict incident-mode
   inputs and deterministic cycles, queryable metric rendering, and the required
-  50-tenant/60%-hot traffic distribution at a 150 TPS sample rate.
+  50-tenant/60%-hot traffic distribution at a 150 TPS sample rate; the
+  deadline-based pacer is also checked against integer-millisecond timer
+  resolution.
 - `apps/dashboard/app/lib/*.test.ts` — approval-rate maths (empty window is
   `null`, not `0`), tenant-health thresholds, active-filter behavior, outcome
   severity banding, runtime `QueryResult` validation, and API URL serialization
@@ -138,6 +166,15 @@ need Docker, bind live ports, or connect to Postgres, Redis, or Kafka.
 
 The two tenant-scoping tests were verified by deliberately reintroducing each
 bug and confirming the suite goes red, rather than trusting a green run.
+
+### Representative-load evidence
+
+A short isolated 150 TPS end-to-end run produced 11,245 Kafka-acknowledged
+events in approximately 75 seconds (149.9 TPS), with zero drops, Kafka lag at
+the 1–2 message moving edge, and cache-expired API query latency of 23.1ms p50 /
+51.4ms p95 across seven samples. The full commands, measurements, caveats, and
+the timer-precision defect discovered during the first attempt are recorded in
+[`evidence/150-tps-smoke.md`](evidence/150-tps-smoke.md).
 
 ### Demo knobs (env vars on the generator)
 
@@ -194,7 +231,7 @@ consumer crashes mid-write and diffing row counts before/after: zero duplicate
 
 ## Robustness fixes from an external audit
 
-An external code-review pass on this prototype found six real issues, all
+Successive external code-review passes on this prototype found concrete issues, all
 verified and fixed rather than argued with:
 
 1. **Kafka replay could duplicate rows.** Insert-then-publish-then-commit
@@ -226,12 +263,17 @@ verified and fixed rather than argued with:
    genuine database outage — became HTTP 400 as if it were bad client input.
    Fixed with a real `/ready` check and a `ValidationError` type that
    distinguishes "bad request" (400) from "something broke" (500).
-   Re-testing this by actually stopping Postgres under a live API instance
-   surfaced a sixth, worse issue: `pg.Pool` had no `error` listener, so the
-   connection loss was an *unhandled* event that crashed the whole process —
-   the same gap existed on the consumer's pool and both Redis clients. All
-   four now have listeners; verified by restarting Postgres under both live
-   processes and confirming neither dies.
+6. **Unhandled dependency error events could crash a process.** Re-testing
+   readiness by actually stopping Postgres under a live API instance surfaced
+   that `pg.Pool` had no `error` listener, so connection loss terminated the
+   process; the same gap existed on the consumer pool and both Redis clients.
+   All four now have listeners and survived dependency restarts in live tests.
+7. **An initial Redis subscription failure could still crash the API.** An
+   EventEmitter `error` listener does not consume the rejected `SUBSCRIBE`
+   promise. The API now observes that promise, keeps subscriber request retries
+   open through normal reconnects, and resets/retries the singleton after a
+   terminal subscription failure. Regression coverage includes asynchronous
+   rejection and synchronous client failure.
 
 ## Known simplifications (stated on purpose, not gaps)
 
@@ -279,8 +321,9 @@ dependency outages, incident drill-down, and the query cache under concurrency.
 
 ## Next steps
 
-1. Run a 24-hour, 150 TPS soak test and capture query latency, Kafka lag, database
-   growth, and reconnect behavior as explicit service-level objectives.
+1. Extend the completed short 150 TPS smoke into a 24-hour soak and capture
+   query latency, Kafka lag, database growth, and reconnect behavior as explicit
+   service-level objectives.
 2. Replace demo authentication with the platform IdP and move SSE credentials to
    secure httpOnly cookies (or a fetch-based stream) so tokens never appear in URLs.
 3. Partition `tx_events` by time and add hourly/minute rollups if the soak test shows

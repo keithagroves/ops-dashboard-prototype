@@ -222,8 +222,9 @@ For the prototype demo, Redpanda (single binary, Kafka-compatible) + a local Pos
   approval-rate view and the surface where an incident becomes visible),
   latency p50/p95, and a drill-down table — matches what the spec explicitly
   asks the prototype to prove (filter + drill down).
-- **Tenant-switching UX**: a role toggle (Tenant view / Global ops view) in
-  the filter bar. Tenant view locks the tenant selector to "logged in as
-  tenant X"; global view leaves it open as an optional cross-tenant drill-down
-  filter. No real auth in the prototype — this stands in for what a verified
-  JWT claim would enforce in production.
+- **Tenant-switching UX and authorization**: signed demo JWTs carry the verified
+  global or tenant role. Tenant sessions are locked server-side to their token's
+  tenant and never receive cross-tenant navigation; global operators get the
+  50-tenant health navigator and may drill into any tenant. Production replaces
+  the synthetic user directory with the platform IdP while preserving the same
+  claim-derived query boundary.
