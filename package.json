@@ -14,6 +14,7 @@
     "dev:consumer": "npm run dev -w services/consumer",
     "dev:api": "npm run dev -w services/api",
     "dev:dashboard": "npm run dev -w apps/dashboard",
-    "db:migrate": "docker exec -i interview-postgres-1 psql -U nymbus -d ops_dashboard < db/migrations/0001_add_kafka_coordinates.sql"
+    "test": "npm test -w services/api && npm test -w apps/dashboard",
+    "db:migrate": "docker compose exec -T postgres psql -U nymbus -d ops_dashboard < db/migrations/0001_add_kafka_coordinates.sql"
   }
 }
