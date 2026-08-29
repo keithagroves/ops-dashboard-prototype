@@ -5,6 +5,7 @@ import type { QueryFilters, QueryResult, TenantHealthPoint } from "@nymbus/share
 import { buildUrl } from "./queryUrl";
 import { sameTenantHealth } from "./tenantHealth";
 import { isSameScope, scopeKeyOf } from "./sseScope";
+import { isQueryResult } from "./queryResult";
 
 export function useSse(filters: QueryFilters, token: string) {
   const [snapshot, setSnapshot] = useState<{
@@ -14,6 +15,7 @@ export function useSse(filters: QueryFilters, token: string) {
     receivedAt: number;
   } | null>(null);
   const [connectedKey, setConnectedKey] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<{ key: string; message: string } | null>(null);
   // Tenant health is navigation context, not filter-scoped panel data. Keep
   // the last list for this exact token while a replacement filtered stream
   // connects, so changing vendor/type does not unmount the whole navigator.
@@ -31,11 +33,30 @@ export function useSse(filters: QueryFilters, token: string) {
     const url = buildUrl("/api/stream", filters, token);
     const es = new EventSource(url);
 
-    es.onopen = () => setConnectedKey(key);
-    es.onerror = () => setConnectedKey((current) => (current === key ? null : current));
+    es.onopen = () => {
+      setConnectedKey(key);
+      setStreamError((current) => (current?.key === key ? null : current));
+    };
+    es.onerror = (event) => {
+      // The API's custom `event: error` frame is a MessageEvent and does not
+      // close the stream. A transport error has no data and changes connection
+      // status while EventSource performs its normal reconnect behavior.
+      if ("data" in event && typeof event.data === "string") {
+        try {
+          const payload = JSON.parse(event.data) as { error?: unknown };
+          setStreamError({ key, message: typeof payload.error === "string" ? payload.error : "Live update failed" });
+        } catch {
+          setStreamError({ key, message: "Live update failed" });
+        }
+        return;
+      }
+      setConnectedKey((current) => (current === key ? null : current));
+    };
     es.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as QueryResult;
+        const parsed: unknown = JSON.parse(event.data);
+        if (!isQueryResult(parsed)) throw new Error("invalid QueryResult shape");
+        const data = parsed;
         if (data.tenants.length > 0) {
           setTenantSnapshot((current) =>
             current?.token === token && sameTenantHealth(current.tenants, data.tenants)
@@ -44,8 +65,11 @@ export function useSse(filters: QueryFilters, token: string) {
           );
         }
         setSnapshot({ key, scope, data, receivedAt: Date.now() });
+        setStreamError((current) => (current?.key === key ? null : current));
       } catch {
-        // ignore malformed frame
+        // Retain the last good snapshot and keep listening, but make the bad
+        // frame visible instead of silently presenting stale data as healthy.
+        setStreamError({ key, message: "Received an invalid live-update payload" });
       }
     };
 
@@ -80,5 +104,6 @@ export function useSse(filters: QueryFilters, token: string) {
     // indicator claim data is fresher than the filter it belongs to.
     lastEventAt: isCurrent ? snapshot.receivedAt : null,
     tenants: tenantSnapshot?.token === token ? tenantSnapshot.tenants : [],
+    error: streamError?.key === key ? streamError.message : null,
   };
 }
