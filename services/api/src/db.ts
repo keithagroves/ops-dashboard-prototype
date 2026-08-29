@@ -1,5 +1,13 @@
 import { Pool } from "pg";
-import type { DrilldownRow, QueryFilters, QueryResult } from "@nymbus/shared";
+import {
+  EFT_VENDORS,
+  MESSAGE_TYPES,
+  OUTCOME_CODES,
+  TX_FAMILIES,
+  type DrilldownRow,
+  type QueryFilters,
+  type QueryResult,
+} from "@nymbus/shared";
 import { ValidationError } from "./errors";
 
 const PG_URL = process.env.DATABASE_URL || "postgres://nymbus:nymbus@localhost:5433/ops_dashboard";
@@ -21,12 +29,37 @@ function bucketSecondsFor(windowMinutes: number): number {
   return 60;
 }
 
+const VALID_WINDOW_MINUTES = [5, 15, 30];
+
 // Cheap enough to call before opening an SSE stream (or from the snapshot
 // route) so an invalid request is rejected with a normal error response
 // instead of getting a 200 + `event: error` frame after the fact.
+//
+// This originally only checked tenantId. Everything else - windowMinutes,
+// eftVendor, messageType, txFamily, outcomeCode - is cast to its enum type
+// in filtersFromQuery without ever being checked against the actual enum,
+// so an arbitrary query string reached the SQL layer unvalidated: an
+// out-of-range windowMinutes (e.g. 1e308) hit Postgres's `interval`
+// arithmetic and surfaced as a 500, and an unrecognized eftVendor silently
+// matched zero rows and returned 200 instead of being rejected.
 export function validateFilters(filters: QueryFilters): void {
   if (filters.role === "tenant" && !filters.tenantId) {
     throw new ValidationError("tenantId is required for role=tenant");
+  }
+  if (filters.windowMinutes !== undefined && !VALID_WINDOW_MINUTES.includes(filters.windowMinutes)) {
+    throw new ValidationError(`windowMinutes must be one of ${VALID_WINDOW_MINUTES.join(", ")}`);
+  }
+  if (filters.eftVendor !== undefined && !(EFT_VENDORS as readonly string[]).includes(filters.eftVendor)) {
+    throw new ValidationError(`eftVendor must be one of ${EFT_VENDORS.join(", ")}`);
+  }
+  if (filters.messageType !== undefined && !(MESSAGE_TYPES as readonly string[]).includes(filters.messageType)) {
+    throw new ValidationError(`messageType must be one of ${MESSAGE_TYPES.join(", ")}`);
+  }
+  if (filters.txFamily !== undefined && !(TX_FAMILIES as readonly string[]).includes(filters.txFamily)) {
+    throw new ValidationError(`txFamily must be one of ${TX_FAMILIES.join(", ")}`);
+  }
+  if (filters.outcomeCode !== undefined && !(OUTCOME_CODES as readonly string[]).includes(filters.outcomeCode)) {
+    throw new ValidationError(`outcomeCode must be one of ${OUTCOME_CODES.join(", ")}`);
   }
 }
 
@@ -79,19 +112,62 @@ function buildWhere(filters: QueryFilters): { clause: string; params: unknown[] 
 // collapses concurrent/rapid calls with an identical filter signature into
 // one shared query, so DB load scales with distinct filter combinations in
 // use, not with connected client count.
-const QUERY_CACHE_MS = 400;
-const queryCache = new Map<string, { at: number; promise: Promise<QueryResult> }>();
+//
+// Two things the first version of this got wrong:
+// - TTL was measured from when the query *started*, not when it settled.
+//   A slow query (e.g. 800ms) plus a second identical call 450ms later,
+//   with a 400ms TTL, saw the entry as "expired" while the first query was
+//   still running - producing two concurrent queries instead of sharing
+//   one. TTL now only applies to *settled* entries; a still-pending promise
+//   is always shared regardless of its age.
+// - The cache had no eviction, so every distinct filter combination a
+//   client could construct grew the Map forever. It's now bounded with
+//   simple LRU eviction (Map iteration order + re-insert-on-hit).
+const QUERY_CACHE_TTL_MS = 400;
+const QUERY_CACHE_MAX_ENTRIES = 200;
+
+interface CacheEntry {
+  promise: Promise<QueryResult>;
+  settledAt: number | null;
+}
+
+const queryCache = new Map<string, CacheEntry>();
 
 export async function runQuery(filters: QueryFilters): Promise<QueryResult> {
   const key = JSON.stringify(filters);
   const cached = queryCache.get(key);
-  if (cached && Date.now() - cached.at < QUERY_CACHE_MS) {
-    return cached.promise;
+
+  if (cached) {
+    const stillFresh = cached.settledAt === null || Date.now() - cached.settledAt < QUERY_CACHE_TTL_MS;
+    if (stillFresh) {
+      // Move to most-recently-used position.
+      queryCache.delete(key);
+      queryCache.set(key, cached);
+      return cached.promise;
+    }
+    queryCache.delete(key);
   }
-  const promise = runQueryUncached(filters);
-  queryCache.set(key, { at: Date.now(), promise });
-  promise.catch(() => queryCache.delete(key));
-  return promise;
+
+  const entry: CacheEntry = { promise: undefined as unknown as Promise<QueryResult>, settledAt: null };
+  entry.promise = runQueryUncached(filters);
+  entry.promise.then(
+    () => {
+      entry.settledAt = Date.now();
+    },
+    () => {
+      // A failed query is never worth reusing - drop it immediately so the
+      // next call retries fresh instead of waiting out a TTL on a rejection.
+      queryCache.delete(key);
+    },
+  );
+
+  if (queryCache.size >= QUERY_CACHE_MAX_ENTRIES) {
+    const oldestKey = queryCache.keys().next().value;
+    if (oldestKey !== undefined) queryCache.delete(oldestKey);
+  }
+  queryCache.set(key, entry);
+
+  return entry.promise;
 }
 
 async function runQueryUncached(filters: QueryFilters): Promise<QueryResult> {
